@@ -14,6 +14,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Crimson Hexagon](http://www.crimsonhexagon.com/)
 * [Despegar](http://www.despegar.com/)
 * [DICE](http://dice.se/)
+* [Dwango](http://dwango.co.jp/)
 * [Foursquare](https://foursquare.com/)
 * [Gigya](https://www.gigya.com/)
 * [Globo.com](http://globo.com/)
@@ -55,6 +56,7 @@ URLs if possible) and [submit a pull request][1]!
 * [Strava](http://www.strava.com/)
   * ["Introducing Routemaster"][8]
 * [StumbleUpon](https://www.stumbleupon.com/)
+* [Südtirol Pass](https://www.sii.bz.it/)
 * [Talenteca](https://www.talenteca.com/)
 * [Tapad](http://www.tapad.com/)
   * [Case study][9] by [Typesafe][10]

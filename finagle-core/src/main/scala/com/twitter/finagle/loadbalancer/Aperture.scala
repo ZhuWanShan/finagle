@@ -1,15 +1,13 @@
 package com.twitter.finagle.loadbalancer
 
-import com.twitter.conversions.time._
 import com.twitter.finagle.service.FailingFactory
-import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
-import com.twitter.finagle.util.{Rng, Ring, Ema, DefaultTimer}
+import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.util.{Rng, Ring, Ema}
 import com.twitter.finagle.{
   ClientConnection, NoBrokersAvailableException, ServiceFactory, ServiceFactoryProxy,
   ServiceProxy, Status}
-import com.twitter.util.{Activity, Return, Future, Throw, Time, Var, Duration, Timer}
+import com.twitter.util.{Activity, Return, Future, Throw, Time, Duration, Timer}
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.logging.Logger
 
 /**
  * The aperture load-band balancer balances load to the smallest
@@ -41,7 +39,7 @@ import java.util.logging.Logger
  *     arranges load in a manner that ensures a higher level of per-service
  *     concurrency.
  */
-private class ApertureLoadBandBalancer[Req, Rep](
+private[loadbalancer] class ApertureLoadBandBalancer[Req, Rep](
     protected val activity: Activity[Traversable[ServiceFactory[Req, Rep]]],
     protected val smoothWin: Duration,
     protected val lowLoad: Double,
@@ -55,7 +53,11 @@ private class ApertureLoadBandBalancer[Req, Rep](
   extends Balancer[Req, Rep]
   with Aperture[Req, Rep]
   with LoadBand[Req, Rep]
-  with Updating[Req, Rep]
+  with Updating[Req, Rep] {
+
+  protected[this] val maxEffortExhausted = statsReceiver.counter("max_effort_exhausted")
+
+}
 
 object Aperture {
   // Note, we need to have a non-zero range for each node
@@ -83,7 +85,7 @@ object Aperture {
  * harmless to adjust apertures frequently, since underlying nodes
  * are typically backed by pools, and will be warm on average.
  */
-private trait Aperture[Req, Rep] { self: Balancer[Req, Rep] =>
+private[loadbalancer] trait Aperture[Req, Rep] { self: Balancer[Req, Rep] =>
   import Aperture._
 
   protected def rng: Rng
@@ -100,9 +102,10 @@ private trait Aperture[Req, Rep] { self: Balancer[Req, Rep] =>
   private[this] val gauge = statsReceiver.addGauge("aperture") { aperture }
 
   protected class Distributor(val vector: Vector[Node], initAperture: Int)
-    extends DistributorT {
+    extends DistributorT[Node] {
     type This = Distributor
 
+    // Indicates if we've seen any down nodes during pick which we expected to be available
     @volatile private[this] var sawDown = false
 
     private[this] val (up, down) = vector.partition(nodeUp) match {
@@ -116,7 +119,7 @@ private trait Aperture[Req, Rep] { self: Balancer[Req, Rep] =>
       } else {
         val numNodes = up.size
         val ring = Ring(numNodes, RingWidth)
-        val unit = (RingWidth/numNodes).toInt
+        val unit = RingWidth/numNodes
         val max = RingWidth/unit
         (ring, unit, max)
       }
@@ -208,7 +211,7 @@ private trait Aperture[Req, Rep] { self: Balancer[Req, Rep] =>
  * The upshot is that `lowLoad` and `highLoad` define an acceptable
  * band of load for each serving unit.
  */
-private trait LoadBand[Req, Rep] { self: Balancer[Req, Rep] with Aperture[Req, Rep] =>
+private[loadbalancer] trait LoadBand[Req, Rep] { self: Balancer[Req, Rep] with Aperture[Req, Rep] =>
   /**
    * The time-smoothing factor used to compute the capacity-adjusted
    * load. Exponential smoothing is used to absorb large spikes or
@@ -270,21 +273,22 @@ private trait LoadBand[Req, Rep] { self: Balancer[Req, Rep] with Aperture[Req, R
 
   protected case class Node(
       factory: ServiceFactory[Req, Rep],
-      counter: AtomicInteger, token: Int)
+      counter: AtomicInteger,
+      token: Int)
     extends ServiceFactoryProxy[Req, Rep](factory)
-    with NodeT {
+    with NodeT[Req, Rep] {
     type This = Node
 
-    def load = counter.get
-    def pending = counter.get
+    def load: Double = counter.get
+    def pending: Int = counter.get
 
     override def apply(conn: ClientConnection) = {
       adjustNode(this, 1)
-      super.apply(conn) transform {
+      super.apply(conn).transform {
         case Return(svc) =>
           Future.value(new ServiceProxy(svc) {
             override def close(deadline: Time) =
-              super.close(deadline) ensure {
+              super.close(deadline).ensure {
                 adjustNode(Node.this, -1)
               }
           })

@@ -89,7 +89,7 @@ object Netty3Listener {
         }
       })
 
-      p.within(deadline - Time.now) transform { _ =>
+      p.by(deadline) transform { _ =>
         activeChannels.close()
         // Force close any remaining connections. Don't wait for success.
         bootstrap.releaseExternalResources()
@@ -101,7 +101,6 @@ object Netty3Listener {
   def addTlsToPipeline(pipeline: ChannelPipeline, newEngine: () => Engine) {
     val engine = newEngine()
     engine.self.setUseClientMode(false)
-    engine.self.setEnableSessionCreation(true)
     val handler = new SslHandler(engine.self)
 
     // Certain engine implementations need to handle renegotiation internally,
@@ -178,11 +177,12 @@ object Netty3Listener {
       case Transport.Verbose(true) => Some(ChannelSnooper(label)(logger.log(Level.INFO, _, _)))
       case _ => None
     }
+    val Transport.Options(noDelay, reuseAddr) = params[Transport.Options]
 
     val opts = new mutable.HashMap[String, Object]()
     opts += "soLinger" -> (0: java.lang.Integer)
-    opts += "reuseAddress" -> java.lang.Boolean.TRUE
-    opts += "child.tcpNoDelay" -> java.lang.Boolean.TRUE
+    opts += "reuseAddress" -> (reuseAddr: java.lang.Boolean)
+    opts += "child.tcpNoDelay" -> (noDelay: java.lang.Boolean)
     for (v <- backlog) opts += "backlog" -> (v: java.lang.Integer)
     for (v <- sendBufSize) opts += "child.sendBufferSize" -> (v: java.lang.Integer)
     for (v <- recvBufSize) opts += "child.receiveBufferSize" -> (v: java.lang.Integer)

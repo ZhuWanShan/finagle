@@ -6,6 +6,7 @@ import com.twitter.finagle.service.TimeoutFilter
 import com.twitter.finagle.stack.nilStack
 import com.twitter.finagle._
 import com.twitter.util._
+import java.net.InetSocketAddress
 import org.junit.runner.RunWith
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
 import org.scalatest.junit.{AssertionsForJUnit, JUnitRunner}
@@ -30,7 +31,7 @@ class LatencyCompensationTest
         implicitly[Stack.Param[LatencyCompensation.Compensator]])
       def make(prms: Stack.Params, next: Stack[ServiceFactory[String, String]]) = {
         val LatencyCompensation.Compensation(compensation) = prms[LatencyCompensation.Compensation]
-        assert(expected === compensation)
+        assert(expected == compensation)
 
         Stack.Leaf(this, ServiceFactory.const(Service.mk[String, String](Future.value)))
       }
@@ -103,7 +104,8 @@ class LatencyCompensationTest
      */
     def whileConnected(echoClient: Echo.Client)(f: Service[String, String] => Unit): Unit = {
       val server = Echo.serve("127.1:0", service)
-      val addr = Addr.Bound(Set(server.boundAddress), metadata)
+      val ia = server.boundAddress.asInstanceOf[InetSocketAddress]
+      val addr = Addr.Bound(Set[Address](Address(ia)), metadata)
       val client = echoClient.newService(Name.Bound(Var.value(addr), "id"), "label")
 
       try f(client)
@@ -131,7 +133,7 @@ class LatencyCompensationTest
           eventually {
             assert(yo.isDefined)
           }
-          assert(Await.result(yo, 10.seconds) === "yo")
+          assert(Await.result(yo, 10.seconds) == "yo")
         }
       }
     }
@@ -162,7 +164,7 @@ class LatencyCompensationTest
           eventually {
             assert(yo.isDefined)
           }
-          assert(Await.result(yo, 10.seconds) === "yo")
+          assert(Await.result(yo, 10.seconds) == "yo")
         }
       }
     }
@@ -189,7 +191,7 @@ class LatencyCompensationTest
           eventually {
             assert(yo.isDefined)
           }
-          assert(Await.result(yo, 10.seconds) === "yo")
+          assert(Await.result(yo, 10.seconds) == "yo")
         }
       }
     }
@@ -204,11 +206,11 @@ class LatencyCompensationTest
         whileConnected(compensatedEchoClient) { client =>
           val sup = client("sup")
           assert(!sup.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           awaitReceipt()
           assert(!sup.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           clock.advance(4.seconds)
           timer.tick() // triggers the timeout
@@ -232,11 +234,11 @@ class LatencyCompensationTest
         whileConnected(compensatedEchoClient) { client =>
           val nm = client("nm")
           assert(!nm.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           awaitReceipt()
           assert(!nm.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           clock.advance(2.seconds)
           timer.tick() // triggers the timeout
@@ -262,11 +264,11 @@ class LatencyCompensationTest
         whileConnected(compensatedEchoClient) { client =>
           val aight = client("aight")
           assert(!aight.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           awaitReceipt()
           assert(!aight.isDefined)
-          assert(respond.interrupted === None)
+          assert(respond.interrupted == None)
 
           clock.advance(4.seconds)
           timer.tick() // does not trigger the timeout
@@ -275,7 +277,7 @@ class LatencyCompensationTest
           eventually {
             assert(aight.isDefined)
           }
-          assert(Await.result(aight, 10.seconds) === "aight")
+          assert(Await.result(aight, 10.seconds) == "aight")
         }
       }
     }

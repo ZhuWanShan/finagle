@@ -29,7 +29,8 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
     if (testServer.isDefined) {
       val service = ClientBuilder()
         .hosts(Seq(testServer.get.address))
-        .codec(new Memcached(stats))
+        .reportTo(stats)
+        .codec(new Memcached())
         .hostConnectionLimit(1)
         .build()
       client = Client(service)
@@ -51,9 +52,9 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
 
   test("set & get") {
     Await.result(client.delete("foo"))
-    assert(Await.result(client.get("foo")) === None)
+    assert(Await.result(client.get("foo")) == None)
     Await.result(client.set("foo", Buf.Utf8("bar")))
-    assert(Await.result(client.get("foo")).get === Buf.Utf8("bar"))
+    assert(Await.result(client.get("foo")).get == Buf.Utf8("bar"))
   }
 
   test("get") {
@@ -61,7 +62,7 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
     Await.result(client.set("baz", Buf.Utf8("boing")))
     val result = Await.result(client.get(Seq("foo", "baz", "notthere")))
       .map { case (key, Buf.Utf8(value)) => (key, value) }
-    assert(result === Map(
+    assert(result == Map(
       "foo" -> "bar",
       "baz" -> "boing"
     ))
@@ -77,9 +78,9 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
           (key, (value, casUnique))
       }
 
-      assert(result === Map(
-        "foos" -> ("xyz", "1"),  // the "cas unique" values are predictable from a fresh memcached
-        "bazs" -> ("zyx", "3")
+      assert(result == Map(
+        "foos" -> (("xyz", "1")),  // the "cas unique" values are predictable from a fresh memcached
+        "bazs" -> (("zyx", "3"))
       ))
     }
   }
@@ -88,14 +89,14 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
     test("cas") {
       Await.result(client.set("x", Buf.Utf8("y")))
       val Some((value, casUnique)) = Await.result(client.gets("x"))
-      assert(value === Buf.Utf8("y"))
-      assert(casUnique === Buf.Utf8("1"))
+      assert(value == Buf.Utf8("y"))
+      assert(casUnique == Buf.Utf8("1"))
 
       assert(!Await.result(client.cas("x", Buf.Utf8("z"), Buf.Utf8("2"))))
       assert(Await.result(client.cas("x", Buf.Utf8("z"), casUnique)))
       val res = Await.result(client.get("x"))
       assert(res.isDefined)
-      assert(res.get === Buf.Utf8("z"))
+      assert(res.get == Buf.Utf8("z"))
     }
   }
 
@@ -103,25 +104,25 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
     Await.result(client.set("foo", Buf.Utf8("bar")))
     Await.result(client.append("foo", Buf.Utf8("rab")))
     val Buf.Utf8(res) = Await.result(client.get("foo")).get
-    assert(res === "barrab")
+    assert(res == "barrab")
     Await.result(client.prepend("foo", Buf.Utf8("rab")))
     val Buf.Utf8(res2) = Await.result(client.get("foo")).get
-    assert(res2 === "rabbarrab")
+    assert(res2 == "rabbarrab")
   }
 
   test("incr & decr") {
     // As of memcached 1.4.8 (issue 221), empty values are no longer treated as integers
     Await.result(client.set("foo", Buf.Utf8("0")))
-    assert(Await.result(client.incr("foo"))    === Some(1L))
-    assert(Await.result(client.incr("foo", 2)) === Some(3L))
-    assert(Await.result(client.decr("foo"))    === Some(2L))
+    assert(Await.result(client.incr("foo"))    == Some(1L))
+    assert(Await.result(client.incr("foo", 2)) == Some(3L))
+    assert(Await.result(client.decr("foo"))    == Some(2L))
 
     Await.result(client.set("foo", Buf.Utf8("0")))
-    assert(Await.result(client.incr("foo"))    === Some(1L))
+    assert(Await.result(client.incr("foo"))    == Some(1L))
     val l = 1L << 50
-    assert(Await.result(client.incr("foo", l)) === Some(l + 1L))
-    assert(Await.result(client.decr("foo"))    === Some(l))
-    assert(Await.result(client.decr("foo", l)) === Some(0L))
+    assert(Await.result(client.incr("foo", l)) == Some(l + 1L))
+    assert(Await.result(client.decr("foo"))    == Some(l))
+    assert(Await.result(client.decr("foo", l)) == Some(0L))
   }
 
   if (Option(System.getProperty("USE_EXTERNAL_MEMCACHED")).isDefined) {
@@ -152,7 +153,7 @@ class SimpleClientTest extends FunSuite with BeforeAndAfter {
 
     intercept[ClientError] { Await.result(client.set("\r", Buf.Utf8("bar"))) }
     intercept[ClientError] { Await.result(client.set("\n", Buf.Utf8("bar"))) }
-    intercept[ClientError] { Await.result(client.set("\0", Buf.Utf8("bar"))) }
+    intercept[ClientError] { Await.result(client.set("\u0000", Buf.Utf8("bar"))) }
 
     val veryLongKey = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
     intercept[ClientError] { Await.result(client.get(veryLongKey)) }

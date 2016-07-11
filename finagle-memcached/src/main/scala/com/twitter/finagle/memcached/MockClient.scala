@@ -15,7 +15,7 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
   def this() = this(mutable.Map[String, Buf]())
 
   def this(contents: Map[String, Array[Byte]]) =
-    this(mutable.Map[String, Buf]() ++ (contents mapValues { v => Buf.ByteArray(v) }))
+    this(mutable.Map[String, Buf]() ++ (contents mapValues { v => Buf.ByteArray.Owned(v) }))
 
   def this(contents: Map[String, String])(implicit m: Manifest[String]) =
     this(contents mapValues { _.getBytes })
@@ -120,21 +120,22 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
    *
    * Note: expiry and flags are ignored.
    */
-  def cas(
+  def checkAndSet(
     key: String,
     flags: Int,
     expiry: Time,
     value: Buf,
     casUnique: Buf
-  ): Future[JBoolean] =
+  ): Future[CasResult] =
     Future.value(
       map.synchronized {
         map.get(key) match {
-          case Some(previousValue) if previousValue != value =>
+          case Some(previousValue) if Interpreter.generateCasUnique(previousValue) == casUnique =>
             map(key) = value
-            true
-          case _ =>
-            false
+            CasResult.Stored
+
+          case Some(_) => CasResult.Exists
+          case None    => CasResult.NotFound
         }
       }
     )
@@ -181,5 +182,12 @@ class MockClient(val map: mutable.Map[String, Buf]) extends Client {
 
   override def toString = {
     "MockClient(" + map.toString + ")"
+  }
+
+  /** Returns an immutable copy of the current cache. */
+  def contents: Map[String, Buf] = {
+    map.synchronized {
+      Map(map.toSeq: _*)
+    }
   }
 }

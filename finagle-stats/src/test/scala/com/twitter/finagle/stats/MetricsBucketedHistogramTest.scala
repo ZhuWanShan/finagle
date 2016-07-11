@@ -1,7 +1,7 @@
 package com.twitter.finagle.stats
 
 import com.twitter.conversions.time._
-import com.twitter.util.Time
+import com.twitter.util.{Time, TimeControl}
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
@@ -36,7 +36,7 @@ class MetricsBucketedHistogramTest extends FunSuite {
         assert(snap0.percentiles().map(_.getValue) === Array(0, 0))
       }
 
-      // roll to window 2 (this should make data A visibile after a call to snapshot)
+      // roll to window 2 (this should make data A visible after a call to snapshot)
       roll()
       val snap1 = h.snapshot()
       withClue(snap1) {
@@ -91,6 +91,146 @@ class MetricsBucketedHistogramTest extends FunSuite {
         assert(snap4.avg() == 0)
         assert(snap4.percentiles().map(_.getValue) === Array(0, 0))
       }
+    }
+  }
+
+  class Ctx(tc: TimeControl) {
+    val h = new MetricsBucketedHistogram(name = "h")
+    val details = h.histogramDetail
+
+    def roll(): Unit = {
+      tc.advance(60.seconds)
+      h.snapshot()
+    }
+  }
+
+  test("histogram snapshot is available on first request") {
+    Time.withCurrentTimeFrozen { tc =>
+      val ctx = new Ctx(tc)
+      import ctx._
+
+      // add some data (A) to the 1st window
+      h.add(1)
+
+      // initial user access to start histogram snapshots
+      val init = details.counts
+      assert(init == Seq(BucketAndCount(1, 2, 1)))
+    }
+  }
+
+  if (!sys.props.contains("SKIP_FLAKY")) // CSL-2941
+  test("histogram snapshot respects refresh window") {
+    Time.withCurrentTimeFrozen { tc =>
+      val ctx = new Ctx(tc)
+      import ctx._
+
+      // add some data (A) to the 1st window
+      h.add(1)
+
+      // initial user access to start histogram snapshots
+      assert(details.counts == Seq(BucketAndCount(1, 2, 1)))
+
+      // call .snapshot() to recompute counts
+      h.snapshot()
+      assert(details.counts == Seq(BucketAndCount(1, 2, 1)))
+
+      h.add(Int.MaxValue)
+      // roll to window 2 (this should make data A visible after a call to snapshot)
+      roll()
+      assert(details.counts == Seq(BucketAndCount(1, 2, 1),
+        BucketAndCount(2137204091, Int.MaxValue, 1)))
+    }
+  }
+
+  if (!sys.props.contains("SKIP_FLAKY")) // CSL-2941
+  test("histogram snapshot stays up-to-date when snapshots are missed") {
+    Time.withCurrentTimeFrozen { tc =>
+      val ctx = new Ctx(tc)
+      import ctx._
+
+      h.add(1)
+      roll()
+      assert(details.counts == Seq(BucketAndCount(1, 2, 1)))
+
+      // Advance several minutes without snapshotting (i.e. to
+      // simulate no reads). Subsequent reads should be stable.
+      h.add(2)
+      tc.advance(1.minute)
+      h.add(3)
+      tc.advance(1.minute)
+      h.add(4)
+      tc.advance(1.minute)
+      h.add(5)
+      tc.advance(1.minute)
+      h.snapshot()
+      val expectedCounts = Seq(
+        BucketAndCount(1, 2, 1),
+        BucketAndCount(2, 3, 1),
+        BucketAndCount(3, 4, 1),
+        BucketAndCount(4, 5, 1),
+        BucketAndCount(5, 6, 1)
+      )
+      assert(details.counts == expectedCounts)
+
+      h.add(6)
+      tc.advance(1.second)
+      h.snapshot()
+      assert(details.counts == expectedCounts)
+
+      h.add(7)
+      tc.advance(1.second)
+      h.snapshot()
+      assert(details.counts == expectedCounts)
+
+      h.add(8)
+      tc.advance(1.second)
+      h.snapshot()
+      assert(details.counts == expectedCounts)
+
+      h.add(9)
+      tc.advance(1.second)
+      h.snapshot()
+      assert(details.counts == expectedCounts)
+
+      h.add(10)
+      tc.advance(1.minute - 4.seconds)
+      h.snapshot()
+      assert(details.counts == Seq(
+        BucketAndCount(6, 7, 1),
+        BucketAndCount(7, 8, 1),
+        BucketAndCount(8, 9, 1),
+        BucketAndCount(9, 10, 1),
+        BucketAndCount(10, 11, 1)
+      ))
+    }
+  }
+
+  if (!sys.props.contains("SKIP_FLAKY")) // CSL-2941
+  test("histogram snapshot erases old data on refresh") {
+    Time.withCurrentTimeFrozen { tc =>
+      val ctx = new Ctx(tc)
+      import ctx._
+
+      // add some data (A) to the 1st window and roll
+      h.add(1)
+      roll()
+
+      // initial user access to histogram snapshots
+      val init = details.counts
+
+      assert(init == Seq(BucketAndCount(1, 2, 1)))
+      roll()
+
+      // add some data (B) to the 2nd window
+      Seq(-1L, 1L).foreach(h.add)
+      roll()
+      val countsSnap0 = details.counts
+      assert(countsSnap0 == Seq(BucketAndCount(0, 1, 1), BucketAndCount(1, 2, 1)))
+
+      // Roll to the next window, histogram should get cleared
+      roll()
+      val countsSnap1 = details.counts
+      assert(countsSnap1 == Seq.empty)
     }
   }
 }

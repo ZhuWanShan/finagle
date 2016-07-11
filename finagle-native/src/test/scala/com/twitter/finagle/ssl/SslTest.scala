@@ -4,12 +4,11 @@ import com.google.common.io.{Files => GuavaFiles, Resources}
 import com.twitter.finagle.Service
 import com.twitter.finagle.builder.{ClientBuilder, ServerBuilder}
 import com.twitter.finagle.http._
-import com.twitter.io.{Buf, TempFile}
+import com.twitter.io.Buf
 import com.twitter.util.{Await, Future, NonFatal}
 import java.io.File
 import java.net.{InetAddress, InetSocketAddress}
 import java.nio.file.{Path, Files}
-import org.jboss.netty.buffer._
 import org.junit.runner.RunWith
 import org.scalatest.FunSuite
 import org.scalatest.junit.JUnitRunner
@@ -42,7 +41,7 @@ class SslTest extends FunSuite {
       certChainInput.setupCADirPath.toFile // working dir
     )
     process.waitFor()
-    assert(process.exitValue === 0)
+    assert(process.exitValue == 0)
   } catch {
     case e: java.io.IOException =>
       println("IOException: I/O error in running setupCA script: " +
@@ -97,7 +96,7 @@ class SslTest extends FunSuite {
     def client =
       ClientBuilder()
         .name("http-client")
-        .hosts(server.boundAddress)
+        .hosts(server.boundAddress.asInstanceOf[InetSocketAddress])
         .codec(codec)
         .hostConnectionLimit(1)
         .tlsWithoutValidation()
@@ -189,14 +188,14 @@ class SslTest extends FunSuite {
       process.getOutputStream.close()
 
       process.waitFor()
-      assert(process.exitValue === 0)
+      assert(process.exitValue == 0)
 
       // look for text "Verify return code: 0 (ok)" on stdout
       val out = process.getInputStream
       val outBuf = new Array[Byte](out.available)
       out.read(outBuf)
       val outBufStr = new String(outBuf)
-      assert("Verify return code: 0 \\(ok\\)".r.findFirstIn(outBufStr) === Some("""Verify return code: 0 (ok)"""))
+      assert("Verify return code: 0 \\(ok\\)".r.findFirstIn(outBufStr) == Some("""Verify return code: 0 (ok)"""))
     } catch {
       case ex: java.io.IOException =>
         println("Test skipped: running openssl failed" +

@@ -60,7 +60,7 @@ trait TwemcacheConnectedClient extends TwemcacheClient { self: ConnectedClient =
       val bufs =  keys.map { Buf.Utf8(_) }.toSeq
       rawGet(Getv(bufs)).map { GetsResult(_) } // map to GetsResult as the response format are the same
     }  catch {
-      case t:IllegalArgumentException => Future.exception(new ClientError(t.getMessage))
+      case t: IllegalArgumentException => Future.exception(new ClientError(t.getMessage + " For keys: " + keys))
     }
   }
 
@@ -73,7 +73,7 @@ trait TwemcacheConnectedClient extends TwemcacheClient { self: ConnectedClient =
         case _        => throw new IllegalStateException
       }
     } catch {
-      case t:IllegalArgumentException => Future.exception(new ClientError(t.getMessage))
+      case t: IllegalArgumentException => Future.exception(new ClientError(t.getMessage + " For key: " + key))
     }
   }
 }
@@ -93,7 +93,7 @@ object TwemcacheClient {
  */
 trait TwemcachePartitionedClient extends TwemcacheClient { self: PartitionedClient =>
 
-  // For now we requires the ParitionedClient must be delgating TwemcacheClient.
+  // For now we requires the ParitionedClient must be delegating TwemcacheClient.
   // Refactory is on the way to re-archytect the partitioned client
   protected[memcached] def twemcacheClientOf(key: String): TwemcacheClient = clientOf(key).asInstanceOf[TwemcacheClient]
 

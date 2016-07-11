@@ -1,6 +1,6 @@
 package com.twitter.finagle
 
-import com.twitter.util.{NonFatal, Future, Time}
+import com.twitter.util.{Future, Time}
 
 /**
  * A [[Filter]] acts as a decorator/transformer of a [[Service service]].
@@ -9,12 +9,12 @@ import com.twitter.util.{NonFatal, Future, Time}
  *           (*  MyService  *)
  * [ReqIn -> (ReqOut -> RepIn) -> RepOut]
  * }}}
- * For example, you may have a POJO service that takes Strings and
- * parses them as Ints.  If you want to expose this as a Network
+ * For example, you may have a service that takes `Strings` and
+ * parses them as `Ints`.  If you want to expose this as a Network
  * Service via Thrift, it is nice to isolate the protocol handling
  * from the business rules. Hence you might have a Filter that
  * converts back and forth between Thrift structs. Again, your service
- * deals with POJOs:
+ * deals with plain objects:
  * {{{
  * [ThriftIn -> (String  ->  Int) -> ThriftOut]
  * }}}
@@ -23,6 +23,8 @@ import com.twitter.util.{NonFatal, Future, Time}
  * In other words, it converts a `Service[ReqOut, RepIn]` to a
  * `Service[ReqIn, RepOut]`.
  *
+ * @see The [[http://twitter.github.io/finagle/guide/ServicesAndFilters.html#filters user guide]]
+ *      for details and examples.
  */
 abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
   extends ((ReqIn, Service[ReqOut, RepIn]) => Future[RepOut])
@@ -45,7 +47,7 @@ abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
    * myModularService = handleExceptions.andThen(thrift2Pojo.andThen(parseString))
    * }}}
    *
-   * '''Note:''' synchronously thrown exceptions in the underlying service are automatically
+   * @note synchronously thrown exceptions in the underlying service are automatically
    * lifted into Future.exception.
    *
    * @param next another filter to follow after this one
@@ -57,7 +59,14 @@ abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
     else AndThen(service => andThen(next.andThen(service)))
 
   /**
-   * Terminates a filter chain in a service. For example,
+   * Convert the [[TypeAgnostic]] filter to a Filter and chain it with
+   * `andThen`.
+   */
+  def agnosticAndThen(next: Filter.TypeAgnostic): Filter[ReqIn, RepOut, ReqOut, RepIn] =
+    andThen(next.toFilter[ReqOut, RepIn])
+
+  /**
+   * Terminates a filter chain in a [[Service]]. For example,
    *
    * {{{
    *   myFilter.andThen(myService)
@@ -78,6 +87,15 @@ abstract class Filter[-ReqIn, +RepOut, +ReqOut, -RepIn]
     req => Filter.this.apply(req, service)
   }
 
+  /**
+   * Terminates a filter chain in a [[ServiceFactory]]. For example,
+   *
+   * {{{
+   *   myFilter.andThen(myServiceFactory)
+   * }}}
+   * @param factory a service factory that takes the output request type and
+   *                the input response type.
+   */
   def andThen(factory: ServiceFactory[ReqOut, RepIn]): ServiceFactory[ReqIn, RepOut] =
     new ServiceFactory[ReqIn, RepOut] {
       val fn: Service[ReqOut, RepIn] => Service[ReqIn, RepOut] =
@@ -180,12 +198,51 @@ object Filter {
    * TypeAgnostic filters are like SimpleFilters but they leave the Rep and Req types unspecified
    * until `toFilter` is called.
    */
-  trait TypeAgnostic {
+  trait TypeAgnostic { self =>
     def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep]
 
-    def andThen(next: TypeAgnostic): TypeAgnostic = new TypeAgnostic {
-      def toFilter[Req, Rep] = toFilter[Req, Rep].andThen(next.toFilter[Req, Rep])
-    }
+    def andThen(next: TypeAgnostic): TypeAgnostic =
+      new TypeAgnostic {
+        def toFilter[Req, Rep] =
+          self.toFilter[Req, Rep].andThen(next.toFilter[Req, Rep])
+      }
+
+    /**
+     * Convert this to an appropriately-typed [[Filter]] and compose
+     * with `andThen`.
+     */
+    def andThen[ReqIn, RepOut, ReqOut, RepIn](
+      next: Filter[ReqIn, RepOut, ReqOut, RepIn]
+    ): Filter[ReqIn, RepOut, ReqOut, RepIn] =
+      toFilter[ReqIn, RepOut].andThen(next)
+
+    /**
+     * Convert this to an appropriately-typed [[Filter]] and compose
+     * with `andThen`.
+     */
+    def andThen[Req, Rep](f: Req => Future[Rep]): Req => Future[Rep] =
+      toFilter[Req, Rep].andThen(f)
+
+    /**
+     * Convert this to an appropriately-typed [[Filter]] and compose
+     * with `andThen`.
+     */
+    def andThen[Req, Rep](svc: Service[Req, Rep]): Service[Req, Rep] =
+      toFilter[Req, Rep].andThen(svc)
+
+    /**
+     * Convert this to an appropriately-typed [[Filter]] and compose
+     * with `andThen`.
+     */
+    def andThen[Req, Rep](factory: ServiceFactory[Req, Rep]): ServiceFactory[Req, Rep] =
+      toFilter[Req, Rep].andThen(factory)
+  }
+
+  object TypeAgnostic {
+    val Identity: TypeAgnostic =
+      new TypeAgnostic {
+        override def toFilter[Req, Rep]: Filter[Req, Rep, Req, Rep] = identity[Req, Rep]
+      }
   }
 
   def identity[Req, Rep]: SimpleFilter[Req, Rep] =

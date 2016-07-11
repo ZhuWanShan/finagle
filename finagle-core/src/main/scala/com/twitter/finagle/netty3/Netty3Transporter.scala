@@ -7,7 +7,7 @@ import com.twitter.finagle.netty3.socks.SocksConnectHandler
 import com.twitter.finagle.netty3.ssl.SslConnectHandler
 import com.twitter.finagle.netty3.transport.ChannelTransport
 import com.twitter.finagle.socks.{SocksProxyFlags, Unauthenticated, UsernamePassAuthenticationSetting}
-import com.twitter.finagle.ssl.Engine
+import com.twitter.finagle.ssl.{SessionVerifier, Engine}
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.transport.Transport
 import com.twitter.finagle.util.DefaultTimer
@@ -143,11 +143,12 @@ object Netty3Transporter {
       case Transport.Verbose(true) => Some(ChannelSnooper(label)(logger.log(Level.INFO, _, _)))
       case _ => None
     }
+    val Transport.Options(noDelay, reuseAddr) = params[Transport.Options]
 
     val opts = new mutable.HashMap[String, Object]()
     opts += "connectTimeoutMillis" -> ((connectTimeout + compensation).inMilliseconds: java.lang.Long)
-    opts += "tcpNoDelay" -> java.lang.Boolean.TRUE
-    opts += "reuseAddress" -> java.lang.Boolean.TRUE
+    opts += "tcpNoDelay" -> (noDelay: java.lang.Boolean)
+    opts += "reuseAddress" -> (reuseAddr: java.lang.Boolean)
     for (v <- keepAlive) opts += "keepAlive" -> (v: java.lang.Boolean)
     for (s <- sendBufSize) opts += "sendBufferSize" -> (s: java.lang.Integer)
     for (s <- recvBufSize) opts += "receiveBufferSize" -> (s: java.lang.Integer)
@@ -319,11 +320,10 @@ case class Netty3Transporter[In, Out](
 
       val engine = newEngine(addr)
       engine.self.setUseClientMode(true)
-      engine.self.setEnableSessionCreation(true)
 
-      val verifier = verifyHost.map(SslConnectHandler.sessionHostnameVerifier).getOrElse {
-        Function.const(None) _
-      }
+      val verifier = verifyHost
+        .map(SessionVerifier.hostname)
+        .getOrElse(SessionVerifier.AlwaysValid)
 
       val sslHandler = new SslHandler(engine.self)
       val sslConnectHandler = new SslConnectHandler(sslHandler, verifier)
@@ -354,8 +354,7 @@ case class Netty3Transporter[In, Out](
               UsernamePassAuthenticationSetting(username, password)
             case _ => Unauthenticated
           }
-          pipeline.addFirst("socksConnect",
-            new SocksConnectHandler(proxyAddr, inetSockAddr, Seq(authentication)))
+          SocksConnectHandler.addHandler(proxyAddr, inetSockAddr, Seq(authentication), pipeline)
         }
       case _ =>
     }

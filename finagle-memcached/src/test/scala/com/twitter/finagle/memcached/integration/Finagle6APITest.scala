@@ -6,8 +6,7 @@ import com.twitter.common.application.ShutdownRegistry.ShutdownRegistryImpl
 import com.twitter.common.zookeeper.testing.ZooKeeperTestServer
 import com.twitter.common.zookeeper.{ServerSets, ZooKeeperClient, ZooKeeperUtils}
 import com.twitter.finagle.Memcached
-import com.twitter.finagle.cacheresolver.CachePoolConfig
-import com.twitter.finagle.memcached.PartitionedClient
+import com.twitter.finagle.memcached.{CachePoolConfig, PartitionedClient}
 import com.twitter.finagle.memcached.util.ChannelBufferUtils._
 import com.twitter.finagle.zookeeper.ZookeeperServerSetCluster
 import com.twitter.io.{Buf, Charsets}
@@ -94,15 +93,15 @@ class Finagle6APITest extends FunSuite with BeforeAndAfter {
       val count = 100
         (0 until count).foreach{
           n => {
-            client.set("foo"+n, Buf.Utf8("bar"+n))()
+            Await.result(client.set("foo"+n, Buf.Utf8("bar"+n)))
           }
         }
 
       (0 until count).foreach {
         n => {
           val c = client.clientOf("foo"+n)
-          val Buf.Utf8(res) = c.get("foo"+n)().get
-          assert(res === "bar"+n)
+          val Buf.Utf8(res) = Await.result(c.get("foo"+n)).get
+          assert(res == "bar"+n)
         }
       }
     }
@@ -116,25 +115,25 @@ class Finagle6APITest extends FunSuite with BeforeAndAfter {
       // Wait for group to contain members
       Thread.sleep(5000)
 
-      client.delete("foo")()
-      assert(client.get("foo")() === None)
-      client.set("foo", Buf.Utf8("bar"))()
+      Await.result(client.delete("foo"))
+      assert(Await.result(client.get("foo")) == None)
+      Await.result(client.set("foo", Buf.Utf8("bar")))
 
-      val Buf.Utf8(res) = client.get("foo")().get
-      assert(res === "bar")
+      val Buf.Utf8(res) = Await.result(client.get("foo")).get
+      assert(res == "bar")
 
       val count = 100
         (0 until count).foreach{
           n => {
-            client.set("foo"+n, Buf.Utf8("bar"+n))()
+            Await.result(client.set("foo"+n, Buf.Utf8("bar"+n)))
           }
         }
 
       (0 until count).foreach {
         n => {
           val c = client.clientOf("foo"+n)
-          val Buf.Utf8(res) = c.get("foo"+n)().get
-          assert(res === "bar"+n)
+          val Buf.Utf8(res) = Await.result(c.get("foo"+n)).get
+          assert(res == "bar"+n)
         }
       }
     }
@@ -144,9 +143,9 @@ class Finagle6APITest extends FunSuite with BeforeAndAfter {
       "twcache!localhost:%d,localhost:%d".format(testServers(0).address.getPort, testServers(1).address.getPort))
 
     Await.result(client.delete("foo"))
-    assert(Await.result(client.get("foo")) === None)
+    assert(Await.result(client.get("foo")) == None)
     Await.result(client.set("foo", Buf.Utf8("bar")))
     val Buf.Utf8(res) = Await.result(client.get("foo")).get
-    assert(res === "bar")
+    assert(res == "bar")
   }
 }

@@ -2,6 +2,8 @@ package com.twitter.finagle.serverset2
 
 import com.twitter.conversions.time._
 import com.twitter.finagle.serverset2.client._
+import com.twitter.finagle.service.Backoff
+import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.finagle.zookeeper.ZkInstance
 import com.twitter.io.Buf
 import com.twitter.util._
@@ -14,6 +16,8 @@ import org.scalatest.{BeforeAndAfter, FunSuite}
 @RunWith(classOf[JUnitRunner])
 class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
   val zkTimeout = 100.milliseconds
+  val retryStream = new RetryStream(Backoff.const(zkTimeout))
+
   @volatile var inst: ZkInstance = _
 
   def toSpan(d: Duration): Span = Span(d.inNanoseconds, Nanoseconds)
@@ -47,8 +51,8 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
       case _ => false
     }
     val notConnected: (WatchState => Boolean) = w => !connected(w)
+    val session1 = ZkSession.retrying(retryStream, () => ZkSession(retryStream, inst.zookeeperConnectString, statsReceiver = NullStatsReceiver))
 
-    val session1 = ZkSession.retrying(zkTimeout, () => ZkSession(inst.zookeeperConnectString))
     @volatile var states = Seq.empty[SessionState]
     val state = session1 flatMap { session1 => session1.state }
     state.changes.register(Witness({ ws => ws match {
@@ -77,7 +81,7 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     Await.result(cond)
     Await.result(state.changes.filter(connected).toFuture())
 
-    assert(states === Seq(
+    assert(states == Seq(
       SessionState.SyncConnected, SessionState.Expired,
       SessionState.Disconnected, SessionState.SyncConnected))
   }
@@ -86,7 +90,8 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
   if (!sys.props.contains("SKIP_FLAKY")) test("ZkSession.retrying") {
     implicit val timer = new MockTimer
     val watch = Stopwatch.start()
-    val varZkSession = ZkSession.retrying(zkTimeout, () => ZkSession(inst.zookeeperConnectString))
+    val varZkSession = ZkSession.retrying(retryStream, () => ZkSession(retryStream,
+      inst.zookeeperConnectString, statsReceiver = NullStatsReceiver))
     val varZkState = varZkSession flatMap { _.state }
 
     @volatile var zkStates = Seq[(SessionState, Duration)]()
@@ -103,9 +108,9 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
 
     // Wait for the initial connect.
     eventually {
-      assert(Var.sample(varZkState) ===
+      assert(Var.sample(varZkState) ==
         WatchState.SessionState(SessionState.SyncConnected))
-      assert(sessions.size === 1)
+      assert(sessions.size == 1)
     }
 
     val session1 = Var.sample(varZkSession)
@@ -147,10 +152,10 @@ class ZkSessionEndToEndTest extends FunSuite with BeforeAndAfter {
     Await.ready(zkConnected)
 
     eventually {
-      assert((zkStates map { case (s, _) => s }).reverse ===
+      assert((zkStates map { case (s, _) => s }).reverse ==
         Seq(SessionState.SyncConnected, SessionState.Disconnected,
           SessionState.Expired, SessionState.SyncConnected))
     }
-    assert(sessions.size === 2)
+    assert(sessions.size == 2)
   }
 }

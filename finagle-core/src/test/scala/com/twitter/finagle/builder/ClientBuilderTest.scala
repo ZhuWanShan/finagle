@@ -1,22 +1,22 @@
 package com.twitter.finagle.builder
 
 import com.twitter.finagle._
+import com.twitter.finagle.client.StringClient
 import com.twitter.finagle.integration.IntegrationBase
 import com.twitter.finagle.param.ProtocolLibrary
-import com.twitter.finagle.stats.NullStatsReceiver
-import com.twitter.finagle.service.{RetryPolicy, FailureAccrualFactory}
-import com.twitter.finagle.stats.InMemoryStatsReceiver
+import com.twitter.finagle.service.RetryPolicy
+import com.twitter.finagle.stats.{InMemoryStatsReceiver, NullStatsReceiver}
 import com.twitter.util._
 import com.twitter.util.registry.{GlobalRegistry, SimpleRegistry}
-import java.util.concurrent.atomic.{AtomicInteger, AtomicBoolean}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import org.junit.runner.RunWith
-import org.mockito.Mockito.{verify, when}
 import org.mockito.Matchers
 import org.mockito.Matchers._
+import org.mockito.Mockito.{verify, when}
 import org.scalatest.FunSuite
-import org.scalatest.mock.MockitoSugar
-import org.scalatest.junit.JUnitRunner
 import org.scalatest.concurrent.{Eventually, IntegrationPatience}
+import org.scalatest.junit.JUnitRunner
+import org.scalatest.mock.MockitoSugar
 
 @RunWith(classOf[JUnitRunner])
 class ClientBuilderTest extends FunSuite
@@ -35,7 +35,8 @@ class ClientBuilderTest extends FunSuite
       preparedFactory.asInstanceOf[ServiceFactory[Any, Nothing]]
 
     val m = new MockChannel
-    when(m.codec.prepareConnFactory(any[ServiceFactory[String, String]])) thenReturn preparedFactory
+    when(m.codec.prepareConnFactory(any[ServiceFactory[String, String]], any[Stack.Params]))
+      .thenReturn(preparedFactory)
   }
 
   test("ClientBuilder should invoke prepareConnFactory on connection") {
@@ -43,7 +44,7 @@ class ClientBuilderTest extends FunSuite
       val client = m.build()
       val requestFuture = client("123")
 
-      verify(m.codec).prepareConnFactory(any[ServiceFactory[String, String]])
+      verify(m.codec).prepareConnFactory(any[ServiceFactory[String, String]], any[Stack.Params])
       verify(preparedFactory)()
 
       assert(!requestFuture.isDefined)
@@ -111,6 +112,26 @@ class ClientBuilderTest extends FunSuite
     ClientBuilder()
       .name("test")
       .hostConnectionLimit(1)
+      .codec(cfClient)
+      .hosts("")
+      .build()
+  }
+
+  verifyProtocolRegistry("#codec(CodecFactory#Client) along with #stack", expected = "fancy") {
+    val ctx = new ClientBuilderHelper {}
+    when(ctx.m.codec.protocolLibraryName).thenReturn("fancy")
+
+    val cfClient: CodecFactory[String, String]#Client =
+      { (_: ClientCodecConfig) => ctx.m.codec }
+
+    val stringClient = new StringClient {}
+
+    ClientBuilder()
+      .name("test")
+      .hostConnectionLimit(1)
+      // make sure that we replace the string client's Stack's
+      // protocol library with the codec's because we call codec afterwards.
+      .stack(stringClient.stringClient)
       .codec(cfClient)
       .hosts("")
       .build()
@@ -190,9 +211,7 @@ class ClientBuilderTest extends FunSuite
         .reportTo(inMemory)
 
       val client = builder.build()
-
-      val FailureAccrualFactory.Param.Configured(numFailures, _) =
-        builder.params(FailureAccrualFactory.Param.param)
+      val numFailures = 5
 
       val service = mock[Service[String, String]]
       when(service("123")) thenReturn Future.exception(WriteException(new Exception()))
@@ -241,19 +260,17 @@ class ClientBuilderTest extends FunSuite
   test("ClientBuilder with stack should collect stats on 'tries' with no retrypolicy") {
     new ClientBuilderHelper {
       val inMemory = new InMemoryStatsReceiver
+      val numFailures = 21  // There will be 20 requeues by default
       val builder = ClientBuilder()
         .name("test")
         .hostConnectionLimit(1)
         .stack(m.client)
         .daemon(true) // don't create an exit guard
         .hosts(Seq(m.clientAddress))
-        .failureAccrualParams(3 -> Duration.fromSeconds(10))
+        .failureAccrualParams(25 -> Duration.fromSeconds(10))
         .reportTo(inMemory)
 
       val client = builder.build()
-
-      val FailureAccrualFactory.Param.Configured(numFailures, _) =
-        builder.params(FailureAccrualFactory.Param.param)
 
       val service = mock[Service[String, String]]
       when(service("123")) thenReturn Future.exception(WriteException(new Exception()))
@@ -311,5 +328,4 @@ class ClientBuilderTest extends FunSuite
       assert(999 == localOnRetry.get)
     }
   }
-
 }

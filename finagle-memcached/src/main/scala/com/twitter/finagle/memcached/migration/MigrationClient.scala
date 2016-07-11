@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.twitter.common.zookeeper.ZooKeeperClient
 import com.twitter.finagle.Memcached
-import com.twitter.finagle.cacheresolver.ZookeeperStateMonitor
 import com.twitter.finagle.memcached._
 import com.twitter.finagle.stats.{ClientStatsReceiver, NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.zookeeper.DefaultZkClientFactory
@@ -37,7 +36,7 @@ private[memcached] object MigrationConstants {
  * Migration client. This client manages a two cache clients representing source and
  * destination cache pool. Depending on the migration state, this client may send dark traffic
  * to destination pool to warm up the cache, or send light traffic to destination pool and fall
- * back to original pool for cache misses. The state transitioning is controlled by opeartor
+ * back to original pool for cache misses. The state transitioning is controlled by operator
  * by setting corresponding metadata in zookeeper.
  */
 class MigrationClient(
@@ -208,8 +207,8 @@ trait DarkWrite extends Client {
   }
 
   // cas operation does not migrate
-  abstract override def cas(key: String, flags: Int, expiry: Time, value: Buf, casUnique: Buf) =
-    super.cas(key, flags, expiry, value, casUnique)
+  abstract override def checkAndSet(key: String, flags: Int, expiry: Time, value: Buf, casUnique: Buf) =
+    super.checkAndSet(key, flags, expiry, value, casUnique)
 
   abstract override def delete(key: String) = {
     val result = super.delete(key)

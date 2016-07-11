@@ -3,12 +3,15 @@ package com.twitter.finagle.service
 import com.twitter.finagle._
 import com.twitter.finagle.param.{HighResTimer, Stats}
 import com.twitter.finagle.stats.{Counter, StatsReceiver}
-import com.twitter.util.{Time, Try, Future}
+import com.twitter.util._
 
 /**
  * The [[Stack]] parameters and modules for configuring
  * '''which''' and '''how many''' failed requests are retried for
  * a client.
+ *
+ * @see The [[https://twitter.github.io/finagle/guide/Servers.html#request-timeout user guide]]
+ *      for more details.
  */
 object Retries {
 
@@ -39,13 +42,33 @@ object Retries {
   /**
    * Determines '''how many''' failed requests are eligible for
    * being retried.
+   *
+   * @param retryBudget maintains a budget of remaining retries for
+   *                    an individual request.
+   *
+   * @param requeueBackoffs schedule of delays applied between each
+   *                        automatic retry.
+   * @note requeueBackoffs only apply to automatic retries and not to
+   *       requests using a [[RetryPolicy]]
    */
-  case class Budget(retryBudget: RetryBudget) {
+  case class Budget(
+      retryBudget: RetryBudget,
+      requeueBackoffs: Stream[Duration] = Budget.emptyBackoffSchedule) {
+    def this(retryBudget: RetryBudget) =
+      this(retryBudget, Budget.emptyBackoffSchedule)
+
     def mk(): (Budget, Stack.Param[Budget]) =
       (this, Budget)
   }
+
   object Budget extends Stack.Param[Budget] {
-    def default: Budget = Budget(RetryBudget())
+    /**
+     * Default backoff stream to use for automatic retries.
+     * All Zero's.
+     */
+    val emptyBackoffSchedule = Backoff.constant(Duration.Zero)
+
+    def default: Budget = Budget(RetryBudget(), emptyBackoffSchedule)
 
     implicit val param: Stack.Param[Budget] = this
   }
@@ -70,7 +93,7 @@ object Retries {
    * (see [[RetryPolicy.RetryableWriteException]]).
    */
   private[finagle] def moduleRequeueable[Req, Rep]: Stackable[ServiceFactory[Req, Rep]] =
-    new Stack.Module2[Stats, Budget, ServiceFactory[Req, Rep]] {
+    new Stack.Module3[Stats, Budget, HighResTimer, ServiceFactory[Req, Rep]] {
       def role: Stack.Role = Retries.Role
 
       def description: String =
@@ -79,14 +102,18 @@ object Retries {
       def make(
         statsP: param.Stats,
         budgetP: Budget,
+        timerP: HighResTimer,
         next: ServiceFactory[Req, Rep]
       ): ServiceFactory[Req, Rep] = {
         val statsRecv = statsP.statsReceiver
         val scoped = statsRecv.scope("retries")
         val requeues = scoped.counter("requeues")
         val retryBudget = budgetP.retryBudget
+        val timer = timerP.timer
 
-        val filters = newRequeueFilter(retryBudget, false, scoped, next)
+        val filters = newRequeueFilter(
+          retryBudget, budgetP.requeueBackoffs, withdrawsOnly = false, scoped, timer, next
+        )
         svcFactory(retryBudget, filters, scoped, requeues, next)
       }
     }
@@ -132,12 +159,14 @@ object Retries {
 
         val filters =
           if (retryPolicy eq RetryPolicy.Never) {
-            newRequeueFilter(retryBudget, false, scoped, next)
+            newRequeueFilter(retryBudget, budgetP.requeueBackoffs, withdrawsOnly = false, scoped, timerP.timer, next)
           } else {
             val retryFilter = new RetryExceptionsFilter[Req, Rep](
               retryPolicy, timerP.timer, statsRecv, retryBudget)
             // note that we wrap the budget, since the retry filter wraps this
-            val requeueFilter = newRequeueFilter(retryBudget, true, scoped, next)
+            val requeueFilter = newRequeueFilter(
+              retryBudget, budgetP.requeueBackoffs, withdrawsOnly = true, scoped, timerP.timer, next
+            )
             retryFilter.andThen(requeueFilter)
           }
 
@@ -147,8 +176,10 @@ object Retries {
 
   private[this] def newRequeueFilter[Req, Rep](
     retryBudget: RetryBudget,
+    retrySchedule: Stream[Duration],
     withdrawsOnly: Boolean,
     statsReceiver: StatsReceiver,
+    timer: Timer,
     next: ServiceFactory[Req, Rep]
   ): RequeueFilter[Req, Rep] = {
     val budget =
@@ -156,11 +187,13 @@ object Retries {
       else retryBudget
     new RequeueFilter[Req, Rep](
       budget,
+      retrySchedule,
       statsReceiver,
       // TODO: If we ensure that the stack doesn't return restartable
       // failures when it isn't Open, we wouldn't need to gate on status.
       () => next.status == Status.Open,
-      MaxRequeuesPerReq)
+      MaxRequeuesPerReq,
+      timer)
   }
 
   private[this] def svcFactory[Req, Rep](
@@ -175,6 +208,8 @@ object Retries {
       // are tied together.
       private[this] val budgetGauge =
         statsReceiver.addGauge("budget") { retryBudget.balance }
+      private[this] val notOpenCounter =
+        statsReceiver.counter("not_open")
 
       private[this] val serviceFn: Service[Req, Rep] => Service[Req, Rep] =
         service => filters.andThen(service)
@@ -188,9 +223,14 @@ object Retries {
        */
       private[this] def applySelf(conn: ClientConnection, n: Int): Future[Service[Req, Rep]] =
         self(conn).rescue {
-          case RetryPolicy.RetryableWriteException(_) if n > 0 && status == Status.Open =>
-            requeuesCounter.incr()
-            applySelf(conn, n-1)
+          case e@RetryPolicy.RetryableWriteException(_) if n > 0 =>
+            if (status == Status.Open) {
+              requeuesCounter.incr()
+              applySelf(conn, n-1)
+            } else {
+              notOpenCounter.incr()
+              Future.exception(e)
+            }
         }
 
       /**

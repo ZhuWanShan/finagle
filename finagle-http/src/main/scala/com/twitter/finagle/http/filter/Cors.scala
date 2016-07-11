@@ -1,7 +1,7 @@
 package com.twitter.finagle.http.filter
 
 import com.twitter.finagle.{Filter, Service}
-import com.twitter.finagle.http.{Request, Response, Status, Method}
+import com.twitter.finagle.http.{Request, Response, Method}
 import com.twitter.util.{Duration, Future}
 
 /** Implements http://www.w3.org/TR/cors/ */
@@ -27,7 +27,7 @@ object Cors {
    * response header (in response to non-preflight requests).
    *
    * If supportsCredentials is true and allowsOrigin does not return '*', the Access-Control-
-   * Allow-Credentials resopnse header will be set to 'true'.
+   * Allow-Credentials response header will be set to 'true'.
    *
    * If maxAge is defined, its value (in seconds) will be set in the Access-Control-Max-Age
    * response header.

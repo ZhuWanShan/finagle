@@ -2,22 +2,110 @@ package com.twitter.finagle.http
 
 import com.twitter.conversions.storage._
 import com.twitter.finagle._
+import com.twitter.finagle.dispatch.GenSerialClientDispatcher
+import com.twitter.finagle.filter.PayloadSizeFilter
 import com.twitter.finagle.http.codec._
-import com.twitter.finagle.http.filter.{DtabFilter, HttpNackFilter}
-import com.twitter.finagle.stats.StatsReceiver
+import com.twitter.finagle.http.filter.{ClientContextFilter, DtabFilter, HttpNackFilter, ServerContextFilter}
+import com.twitter.finagle.http.netty.{Netty3ClientStreamTransport, Netty3ServerStreamTransport}
+import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver, ServerStatsReceiver}
 import com.twitter.finagle.tracing._
 import com.twitter.finagle.transport.Transport
-import com.twitter.util.{Closable, StorageUnit, Try}
+import com.twitter.util.{NonFatal, Closable, StorageUnit, Try}
+import java.net.InetSocketAddress
 import org.jboss.netty.channel.{Channel, ChannelEvent, ChannelHandlerContext, ChannelPipelineFactory, Channels, UpstreamMessageEvent}
 import org.jboss.netty.handler.codec.http._
 
 private[finagle] case class BadHttpRequest(
-  httpVersion: HttpVersion, method: HttpMethod, uri: String, exception: Exception)
-  extends DefaultHttpRequest(httpVersion, method, uri)
+  httpVersion: HttpVersion, method: HttpMethod, uri: String, exception: Throwable)
+    extends DefaultHttpRequest(httpVersion, method, uri)
 
 object BadHttpRequest {
-  def apply(exception: Exception) =
+  def apply(exception: Throwable): BadHttpRequest =
     new BadHttpRequest(HttpVersion.HTTP_1_0, HttpMethod.GET, "/bad-http-request", exception)
+}
+
+private[finagle] sealed trait BadReq
+private[finagle] trait ContentTooLong extends BadReq
+private[finagle] trait UriTooLong extends BadReq
+private[finagle] trait HeaderFieldsTooLarge extends BadReq
+
+private[http] case class BadRequest(httpRequest: HttpRequest, exception: Throwable)
+  extends Request with BadReq {
+  lazy val remoteSocketAddress = new InetSocketAddress(0)
+}
+
+private[finagle] object BadRequest {
+
+  def apply(msg: BadHttpRequest): BadRequest =
+    new BadRequest(msg, msg.exception)
+
+  def apply(exn: Throwable): BadRequest = {
+    val msg = new BadHttpRequest(
+      HttpVersion.HTTP_1_0,
+      HttpMethod.GET,
+      "/bad-http-request",
+      exn
+    )
+
+    apply(msg)
+  }
+
+  def contentTooLong(msg: BadHttpRequest): BadRequest with ContentTooLong =
+    new BadRequest(msg, msg.exception) with ContentTooLong
+
+  def contentTooLong(exn: Throwable): BadRequest with ContentTooLong = {
+    val msg = new BadHttpRequest(
+      HttpVersion.HTTP_1_0,
+      HttpMethod.GET,
+      "/bad-http-request",
+      exn
+    )
+    contentTooLong(msg)
+  }
+
+  def uriTooLong(msg: BadHttpRequest): BadRequest with UriTooLong =
+    new BadRequest(msg, msg.exception) with UriTooLong
+
+  def uriTooLong(exn: Throwable): BadRequest with UriTooLong = {
+    val msg = new BadHttpRequest(
+      HttpVersion.HTTP_1_0,
+      HttpMethod.GET,
+      "/bad-http-request",
+      exn
+    )
+    uriTooLong(msg)
+  }
+
+  def headerTooLong(msg: BadHttpRequest): BadRequest with HeaderFieldsTooLarge  =
+    new BadRequest(msg, msg.exception) with HeaderFieldsTooLarge
+
+  def headerTooLong(exn: Throwable): BadRequest with HeaderFieldsTooLarge = {
+    val msg = new BadHttpRequest(
+      HttpVersion.HTTP_1_0,
+      HttpMethod.GET,
+      "/bad-http-request",
+      exn
+    )
+    headerTooLong(msg)
+  }
+}
+
+
+/**
+ * a HttpChunkAggregator which recovers decode failures into 4xx http responses
+ */
+private[http] class SafeServerHttpChunkAggregator(maxContentSizeBytes: Int) extends HttpChunkAggregator(maxContentSizeBytes) {
+
+  override def handleUpstream(ctx: ChannelHandlerContext, e: ChannelEvent): Unit = {
+    try {
+      super.handleUpstream(ctx, e)
+    } catch {
+      case NonFatal(ex) =>
+        val channel = ctx.getChannel()
+        ctx.sendUpstream(new UpstreamMessageEvent(
+          channel, BadHttpRequest(ex), channel.getRemoteAddress()))
+    }
+  }
 }
 
 /** Convert exceptions to BadHttpRequests */
@@ -73,8 +161,34 @@ case class Http(
     _enableTracing: Boolean = false,
     _maxInitialLineLength: StorageUnit = 4096.bytes,
     _maxHeaderSize: StorageUnit = 8192.bytes,
-    _streaming: Boolean = false
+    _streaming: Boolean = false,
+    _statsReceiver: StatsReceiver = NullStatsReceiver
 ) extends CodecFactory[Request, Response] {
+
+  def this(
+    _compressionLevel: Int,
+    _maxRequestSize: StorageUnit,
+    _maxResponseSize: StorageUnit,
+    _decompressionEnabled: Boolean,
+    _channelBufferUsageTracker: Option[ChannelBufferUsageTracker],
+    _annotateCipherHeader: Option[String],
+    _enableTracing: Boolean,
+    _maxInitialLineLength: StorageUnit,
+    _maxHeaderSize: StorageUnit,
+    _streaming: Boolean
+  ) =
+    this(
+      _compressionLevel,
+      _maxRequestSize,
+      _maxResponseSize,
+      _decompressionEnabled,
+      _channelBufferUsageTracker,
+      _annotateCipherHeader,
+      _enableTracing,
+      _maxInitialLineLength,
+      _maxHeaderSize,
+      _streaming,
+      NullStatsReceiver)
 
   require(_maxRequestSize < 2.gigabytes,
     s"maxRequestSize should be less than 2 Gb, but was ${_maxRequestSize}")
@@ -86,6 +200,7 @@ case class Http(
   def maxRequestSize(bufferSize: StorageUnit) = copy(_maxRequestSize = bufferSize)
   def maxResponseSize(bufferSize: StorageUnit) = copy(_maxResponseSize = bufferSize)
   def decompressionEnabled(yesno: Boolean) = copy(_decompressionEnabled = yesno)
+  @deprecated("Use maxRequestSize to enforce buffer footprint limits", "2016-05-10")
   def channelBufferUsageTracker(usageTracker: ChannelBufferUsageTracker) =
     copy(_channelBufferUsageTracker = Some(usageTracker))
   def annotateCipherHeader(headerName: String) = copy(_annotateCipherHeader = Option(headerName))
@@ -124,23 +239,39 @@ case class Http(
         underlying.map(new DelayedReleaseService(_))
 
       override def prepareConnFactory(
-        underlying: ServiceFactory[Request, Response]
-      ): ServiceFactory[Request, Response] = {
+        underlying: ServiceFactory[Request, Response],
+        params: Stack.Params
+      ): ServiceFactory[Request, Response] =
         // Note: This is a horrible hack to ensure that close() calls from
         // ExpiringService do not propagate until all chunks have been read
         // Waiting on CSL-915 for a proper fix.
-        underlying.map(new DelayedReleaseService(_))
-       }
+        underlying.map { u =>
+          val filters =
+            new ClientContextFilter[Request, Response]
+              .andThen(new DtabFilter.Injector)
+              .andThenIf(!_streaming ->
+                new PayloadSizeFilter[Request, Response](
+                  params[param.Stats].statsReceiver, _.content.length, _.content.length
+                )
+              )
+
+          filters.andThen(new DelayedReleaseService(u))
+        }
 
       override def newClientTransport(ch: Channel, statsReceiver: StatsReceiver): Transport[Any,Any] =
-        new HttpTransport(super.newClientTransport(ch, statsReceiver))
+        super.newClientTransport(ch, statsReceiver)
 
-      override def newClientDispatcher(transport: Transport[Any, Any]) =
-        new HttpClientDispatcher(transport)
+      override def newClientDispatcher(transport: Transport[Any, Any], params: Stack.Params) =
+        new HttpClientDispatcher(
+          new HttpTransport(new Netty3ClientStreamTransport(transport)),
+          params[param.Stats].statsReceiver.scope(GenSerialClientDispatcher.StatsScope)
+        )
 
       override def newTraceInitializer =
         if (_enableTracing) new HttpClientTraceInitializer[Request, Response]
         else TraceInitializerFilter.empty[Request, Response]
+
+      override def protocolLibraryName: String = Http.this.protocolLibraryName
     }
   }
 
@@ -165,6 +296,9 @@ case class Http(
             pipeline.addLast("httpCompressor", new TextualContentCompressor)
           }
 
+          if (_decompressionEnabled)
+            pipeline.addLast("httpDecompressor", new HttpContentDecompressor)
+
           // The payload size handler should come before the RespondToExpectContinue handler so that we don't
           // send a 100 CONTINUE for oversize requests we have no intention of handling.
           pipeline.addLast("payloadSizeHandler", new PayloadSizeHandler(maxRequestSizeInBytes))
@@ -174,7 +308,7 @@ case class Http(
           if (!_streaming)
             pipeline.addLast(
               "httpDechunker",
-              new HttpChunkAggregator(maxRequestSizeInBytes))
+              new SafeServerHttpChunkAggregator(maxRequestSizeInBytes))
 
           _annotateCipherHeader foreach { headerName: String =>
             pipeline.addLast("annotateCipher", new AnnotateCipher(headerName))
@@ -187,13 +321,24 @@ case class Http(
       override def newServerDispatcher(
         transport: Transport[Any, Any],
         service: Service[Request, Response]
-      ): Closable =
-        new HttpServerDispatcher(new HttpTransport(transport), service)
+      ): Closable = new HttpServerDispatcher(
+        new HttpTransport(new Netty3ServerStreamTransport(transport)),
+        service,
+        ServerStatsReceiver)
 
       override def prepareConnFactory(
-        underlying: ServiceFactory[Request, Response]
-      ): ServiceFactory[Request, Response] =
-        (new HttpNackFilter).andThen(new DtabFilter.Finagle[Request]).andThen(underlying)
+        underlying: ServiceFactory[Request, Response],
+        params: Stack.Params
+      ): ServiceFactory[Request, Response] = {
+        val param.Stats(stats) = params[param.Stats]
+        new HttpNackFilter(stats)
+          .andThen(new DtabFilter.Extractor)
+          .andThen(new ServerContextFilter[Request, Response])
+          .andThenIf(!_streaming -> new PayloadSizeFilter[Request, Response](
+            stats, _.content.length, _.content.length)
+          )
+          .andThen(underlying)
+      }
 
       override def newTraceInitializer =
         if (_enableTracing) new HttpServerTraceInitializer[Request, Response]

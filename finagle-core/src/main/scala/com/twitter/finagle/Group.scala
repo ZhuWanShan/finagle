@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference
  * '''Note:''' querying groups is nonblocking, which means that
  * derived groups are effectively eventually consistent.
  *
- * '''Note:''' `T`s must be hashable, definining `hashCode` and
+ * '''Note:''' `T`s must be hashable, defining `hashCode` and
  * `equals` to ensure that maps have exactly-once semantics.
  *
  * '''Note:''' Groups are invariant because Scala's Sets are. In
@@ -107,7 +107,7 @@ trait Group[T] { outer =>
 private[finagle] case class NameGroup(name: Name.Bound)
   extends Group[SocketAddress] {
     protected[finagle] lazy val set: Var[Set[SocketAddress]] = name.addr map {
-      case Addr.Bound(set, _) => set
+      case Addr.Bound(set, _) => set.collect { case Address.Inet(ia, _) => ia }
       case _ => Set()
     }
   }
@@ -138,8 +138,8 @@ object Group {
   }
 
   def fromVarAddr(va: Var[Addr]): Group[SocketAddress] = new Group[SocketAddress] {
-    protected[finagle] val set = va map {
-      case Addr.Bound(sockaddrs, _) => sockaddrs
+    protected[finagle] val set: Var[Set[SocketAddress]]  = va map {
+      case Addr.Bound(addrs, _) => addrs.collect { case Address.Inet(ia, _) => ia }
       case _ => Set[SocketAddress]()
     }
   }

@@ -5,27 +5,8 @@ import com.twitter.finagle._
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.factory.TrafficDistributor
 import com.twitter.finagle.stats._
-import com.twitter.util.{Activity, Var}
-import java.net.SocketAddress
+import com.twitter.util.{Activity, Future, Time, Var}
 import java.util.logging.{Level, Logger}
-
-/**
- * Allows duplicate SocketAddresses to be threaded through the
- * load balancer while avoiding the cache.
- */
-private object SocketAddresses {
-  trait Wrapped extends SocketAddress {
-    def underlying: SocketAddress
-  }
-
-  def unwrap(addr: SocketAddress): SocketAddress = {
-    addr match {
-      case sa: Wrapped => unwrap(sa.underlying)
-      case WeightedSocketAddress(s, _) => unwrap(s)
-      case _ => addr
-    }
-  }
-}
 
 object perHostStats extends GlobalFlag(false, "enable/default per-host stats.\n" +
   "\tWhen enabled,the configured stats receiver will be used,\n" +
@@ -154,26 +135,57 @@ object LoadBalancerFactory {
       // that `sockaddr` is an available param for `next`. Note, in the default
       // client stack, `next` represents the endpoint stack which will result
       // in a connection being established when materialized.
-      def newEndpoint(sockaddr: SocketAddress): ServiceFactory[Req, Rep] = {
+      def newEndpoint(addr: Address): ServiceFactory[Req, Rep] = {
         val stats = if (hostStatsReceiver.isNull) statsReceiver else {
-          val scope = sockaddr match {
-            case WeightedInetSocketAddress(addr, _) =>
-              "%s:%d".format(addr.getHostName, addr.getPort)
+          val scope = addr match {
+            case Address.Inet(ia, _) =>
+              "%s:%d".format(ia.getHostName, ia.getPort)
             case other => other.toString
           }
           val host = hostStatsReceiver.scope(label).scope(scope)
           BroadcastStatsReceiver(Seq(host, statsReceiver))
         }
 
-        val composite = reporter(label, Some(sockaddr)) andThen monitor
+        val composite = {
+          val ia = addr match {
+            case Address.Inet(ia, _) => Some(ia)
+            case _ => None
+          }
+          reporter(label, ia).andThen(monitor)
+        }
 
-        val underlying = next.make(params +
-            Transporter.EndpointAddr(SocketAddresses.unwrap(sockaddr)) +
-            param.Stats(stats) +
-            param.Monitor(composite))
-
-        new ServiceFactoryProxy(underlying) {
-          override def toString = sockaddr.toString
+        // While constructing a single endpoint stack is fairly cheap,
+        // creating a large number of them can be expensive. On server
+        // set change, if the set of endpoints is large, and we
+        // initialized endpoint stacks eagerly, it could delay the load
+        // balancer readiness significantly. Instead, we spread that
+        // cost across requests by moving endpoint stack creation into
+        // service acquisition (apply method below).
+        new ServiceFactory[Req, Rep] {
+          var underlying: ServiceFactory[Req, Rep] = null
+          var isClosed = false
+          def apply(conn: ClientConnection): Future[Service[Req, Rep]] = {
+            synchronized {
+              if (isClosed) return Future.exception(new ServiceClosedException)
+              if (underlying == null) underlying = next.make(params +
+                Transporter.EndpointAddr(addr) +
+                param.Stats(stats) +
+                param.Monitor(composite))
+            }
+            underlying(conn)
+          }
+          def close(deadline: Time): Future[Unit] = synchronized {
+            isClosed = true
+            if (underlying == null) Future.Done
+            else underlying.close(deadline)
+          }
+          override def status: Status = synchronized {
+            if (underlying == null)
+              if (!isClosed) Status.Open
+              else Status.Closed
+            else underlying.status
+          }
+          override def toString: String = addr.toString
         }
       }
 
@@ -182,7 +194,7 @@ object LoadBalancerFactory {
       def newBalancer(endpoints: Activity[Set[ServiceFactory[Req, Rep]]]) =
         loadBalancerFactory.newBalancer(endpoints, balancerStats, balancerExc)
 
-      val destActivity: Activity[Set[SocketAddress]] = Activity(dest.map {
+      val destActivity: Activity[Set[Address]] = Activity(dest.map {
         case Addr.Bound(set, _) =>
           Activity.Ok(set)
         case Addr.Neg =>
@@ -196,10 +208,10 @@ object LoadBalancerFactory {
             log.fine(s"$label: name resolution is pending")
           }
           Activity.Pending
-      })
+      }: Var[Activity.State[Set[Address]]])
 
       // Instead of simply creating a newBalancer here, we defer to the
-      // traffic distributor to interpret `WeightedSocketAddresses`.
+      // traffic distributor to interpret weighted `Addresses`.
       Stack.Leaf(role, new TrafficDistributor[Req, Rep](
         dest = destActivity,
         newEndpoint = newEndpoint,
@@ -227,15 +239,14 @@ object LoadBalancerFactory {
 object ConcurrentLoadBalancerFactory {
   import LoadBalancerFactory._
 
-  private case class ReplicatedSocketAddress(underlying: SocketAddress, i: Int)
-    extends SocketAddresses.Wrapped
+  private val ReplicaKey = "concurrent_lb_replica"
 
-  private def replicate(num: Int): SocketAddress => Set[SocketAddress] = {
-    case sa: SocketAddresses.Wrapped => Set(sa)
-    case sa =>
-      val (base, w) = WeightedSocketAddress.extract(sa)
+  // package private for testing
+  private[finagle] def replicate(num: Int): Address => Set[Address] = {
+    case Address.Inet(ia, metadata) =>
       for (i: Int <- (0 until num).toSet) yield
-        WeightedSocketAddress(ReplicatedSocketAddress(base, i), w)
+        Address.Inet(ia, metadata + (ReplicaKey -> i))
+    case addr => Set(addr)
   }
 
   /**
@@ -258,7 +269,7 @@ object ConcurrentLoadBalancerFactory {
         val Param(numConnections) = params[Param]
         val Dest(dest) = params[Dest]
         val newDest = dest.map {
-          case bound@Addr.Bound(set, meta) =>
+          case bound@Addr.Bound(set, _) =>
             bound.copy(addrs = set.flatMap(replicate(numConnections)))
           case addr => addr
         }
@@ -268,10 +279,13 @@ object ConcurrentLoadBalancerFactory {
 }
 
 /**
- * A thin interface around a Balancer's contructor that allows Finagle to pass in
+ * A thin interface around a Balancer's constructor that allows Finagle to pass in
  * context from the stack to the balancers at construction time.
  *
  * @see [[Balancers]] for a collection of available balancers.
+ *
+ * @see The [[https://twitter.github.io/finagle/guide/Clients.html#load-balancing user guide]]
+ *      for more details.
  */
 abstract class LoadBalancerFactory {
   /**
@@ -295,18 +309,16 @@ abstract class LoadBalancerFactory {
 }
 
 /**
- * We expose the ability to configure balancers per-process via flags. However,
- * this is generally not a good idea as Finagle processes usually contain many clients.
- * This will likely go away in the future or be no-op and, therfore, should not be
- * depended on. Instead, configure your balancers via the `configured` method on
- * clients:
+ * We expose the ability to configure balancers per-process via flags. 'heap',
+ * 'choice', and 'aperture' are valid choices for defaultBalancer. However, using
+ * this is generally not a good idea, as Finagle processes usually contain many clients.
+ * To configure the load balancer method on a client, use the `configured` method like so:
  *
  * {{
  *    val balancer = Balancers.aperture(...)
  *    Protocol.configured(LoadBalancerFactory.Param(balancer))
  * }}
  */
-@deprecated("Use com.twitter.finagle.loadbalancer.Balancers per-client.", "2015-06-15")
 object defaultBalancer extends GlobalFlag("choice", "Default load balancer")
 
 package exp {
@@ -327,8 +339,9 @@ object DefaultBalancerFactory extends LoadBalancerFactory {
     defaultBalancer() match {
       case "heap" => Balancers.heap()
       case "choice" => p2c()
+      case "aperture" => Balancers.aperture()
       case x =>
-        log.warning(s"""Invalid load balancer ${x}, using "choice" balancer.""")
+        log.warning(s"""Invalid load balancer $x, using "choice" balancer.""")
         p2c()
     }
 

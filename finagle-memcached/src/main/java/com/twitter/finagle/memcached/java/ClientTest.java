@@ -6,9 +6,8 @@ import com.google.common.collect.ImmutableSet;
 
 import com.twitter.finagle.Service;
 import com.twitter.finagle.builder.ClientBuilder;
-import com.twitter.finagle.cacheresolver.CacheNode;
-import com.twitter.finagle.cacheresolver.CachePoolCluster;
-import com.twitter.finagle.cacheresolver.java.CachePoolClusterUtil;
+import com.twitter.finagle.memcached.CacheNode;
+import com.twitter.finagle.memcached.CachePoolCluster;
 import com.twitter.finagle.memcached.KetamaClientBuilder;
 import com.twitter.finagle.memcached.protocol.Command;
 import com.twitter.finagle.memcached.protocol.Response;
@@ -23,6 +22,7 @@ public final class ClientTest {
 
   private ClientTest() { }
 
+  @SuppressWarnings("unchecked")
   public static void main(String[] args) throws Exception {
     Service<Command, Response> service =
       ClientBuilder.safeBuild(
@@ -39,7 +39,7 @@ public final class ClientTest {
     CachePoolCluster cluster = CachePoolClusterUtil.newStaticCluster(
         ImmutableSet.of(new CacheNode("localhost", 11211, 1)));
 
-    ClientBuilder builder = ClientBuilder.get().codec(new Memcached(null));
+    ClientBuilder builder = ClientBuilder.get().codec(new Memcached());
     com.twitter.finagle.memcached.Client memcachedClient = KetamaClientBuilder.get()
         .cachePoolCluster(cluster)
         .clientBuilder(builder)

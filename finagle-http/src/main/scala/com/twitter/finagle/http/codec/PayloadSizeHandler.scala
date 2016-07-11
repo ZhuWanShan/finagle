@@ -19,7 +19,6 @@ private[http] class PayloadSizeHandler(maxRequestPayloadSize: Int)
       Channels.write(ctx, writeF, tooLargeResponse, m.getRemoteAddress)
       writeF.addListener(ChannelFutureListener.CLOSE)
 
-    // todo: should we enforce the payload limit on responses?
     case _ => super.messageReceived(ctx, m)
   }
 }
@@ -28,6 +27,7 @@ private[codec] object PayloadSizeHandler {
   def mkTooLargeResponse(version: HttpVersion): HttpResponse = {
     val resp = new DefaultHttpResponse(version, HttpResponseStatus.REQUEST_ENTITY_TOO_LARGE)
     HttpHeaders.setHeader(resp, HttpHeaders.Names.CONNECTION, "close")
+    HttpHeaders.setHeader(resp, HttpHeaders.Names.CONTENT_LENGTH, 0)
     resp
   }
 }

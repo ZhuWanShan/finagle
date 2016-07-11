@@ -4,6 +4,8 @@ import com.twitter.concurrent.Broker
 import com.twitter.conversions.time._
 import com.twitter.finagle._
 import com.twitter.finagle.memcached._
+import com.twitter.finagle.service.{Backoff, ResponseClassifier}
+import com.twitter.finagle.service.exp.FailureAccrualPolicy
 import com.twitter.finagle.stats.NullStatsReceiver
 import com.twitter.util.{Await, Future, MockTimer, Time}
 import org.junit.runner.RunWith
@@ -36,9 +38,18 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
     val broker = new Broker[NodeHealth]
 
     val timer = new MockTimer
+    val label = "test"
     val factory =
       new KetamaFailureAccrualFactory[Int, Int](
-        underlying, 3, () => 10.seconds, timer, key, broker, ejectFailedHost, NullStatsReceiver)
+        underlying = underlying,
+        policy = FailureAccrualPolicy.consecutiveFailures(3, Backoff.const(10.seconds)),
+        responseClassifier = ResponseClassifier.Default,
+        timer = timer,
+        statsReceiver = NullStatsReceiver,
+        key = key,
+        healthBroker = broker,
+        ejectFailedHost = ejectFailedHost,
+        label = label)
 
     val service = Await.result(factory())
     verify(underlying)()
@@ -64,12 +75,13 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
-      assert(broker.recv.sync().isDefined === false)
+      assert(broker.recv.sync().isDefined == false)
 
       // skips dispatch
-      intercept[FailureAccrualException] {
+      val failureAccrualEx = intercept[FailureAccrualException] {
         Await.result(factory())
       }
+      assert(failureAccrualEx.serviceName == label)
       verify(underlyingService, times(3))(123)
 
       timeControl.advance(10.seconds)
@@ -78,11 +90,11 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       // revives after duration
       assert(factory.isAvailable)
       assert(service.isAvailable)
-      assert(broker.recv.sync().isDefined === false)
+      assert(broker.recv.sync().isDefined == false)
 
       when(underlyingService(123)) thenReturn Future.value(123)
 
-      assert(Await.result(service(123)) === 123)
+      assert(Await.result(service(123)) == 123)
 
       // failures # is reset to 0
       intercept[Exception] {
@@ -117,7 +129,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       }
       assert(!factory.isAvailable)
       assert(!service.isAvailable)
-      assert(broker.recv.sync().isDefined === false)
+      assert(broker.recv.sync().isDefined == false)
 
       // skips dispatch after consecutive failures
       intercept[FailureAccrualException] {
@@ -150,7 +162,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
 
       // ejects
       val recv = broker.recv.sync()
-      assert(Await.result(recv) === NodeMarkedDead(key))
+      assert(Await.result(recv) == NodeMarkedDead(key))
 
       timeControl.advance(10.seconds)
       timer.tick()
@@ -166,7 +178,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       assert(factory.isAvailable)
       assert(service.isAvailable)
       val recv2 = broker.recv.sync()
-      assert(Await.result(recv2) === NodeRevived(key))
+      assert(Await.result(recv2) == NodeRevived(key))
     }
   }
 
@@ -184,7 +196,7 @@ class KetamaFailureAccrualFactoryTest extends FunSuite with MockitoSugar {
       import h._
 
       def assertReponse(rep: Future[Int]) {
-        if (rep.isReturn) assert(Await.result(service(123)) === rep.get)
+        if (Await.result(rep.liftToTry).isReturn) assert(Await.result(service(123)) == Await.result(rep))
         else intercept[Exception](Await.result(service(123)))
       }
 

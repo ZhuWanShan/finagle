@@ -1,6 +1,6 @@
 package com.twitter.finagle.exp.mysql
 
-import com.twitter.finagle.exp.mysql.transport.BufferWriter
+import com.twitter.finagle.exp.mysql.transport.MysqlBufWriter
 import java.util.logging.Logger
 import language.implicitConversions
 
@@ -13,7 +13,7 @@ sealed trait Parameter {
   def value: A
   def evidence: CanBeParameter[A]
 
-  final def writeTo(writer: BufferWriter): Unit = {
+  final def writeTo(writer: MysqlBufWriter): Unit = {
     evidence.write(writer, value)
   }
 
@@ -21,7 +21,11 @@ sealed trait Parameter {
   final def typeCode: Short = evidence.typeCode(value)
 }
 
+/**
+ * Note: There is a Java-friendly API for this object: [[com.twitter.finagle.exp.mysql.Parameters]].
+ */
 object Parameter {
+
   implicit def wrap[_A](_value: _A)(implicit _evidence: CanBeParameter[_A]): Parameter = {
     if (_value == null) {
       NullParameter
@@ -70,4 +74,16 @@ object Parameter {
     def value = null
     def evidence = CanBeParameter.nullCanBeParameter
   }
+}
+
+/**
+ * A Java adaptation of the [[com.twitter.finagle.exp.mysql.Parameter]] companion object.
+ */
+object Parameters {
+
+  def nullParameter: Parameter = Parameter.NullParameter
+
+  def unsafeWrap(value: Any): Parameter = Parameter.unsafeWrap(value)
+
+  //TODO: create an accessor to Parameter.wrap, so type errors are caught at compile time.
 }

@@ -12,9 +12,9 @@ import com.twitter.util.{Await, Duration, Future, Throw, Try}
 
 object ThriftServiceIfaceExample {
   def main(args: Array[String]) {
-    // See the docs at http://twitter.github.io/finagle/guide/Protocols.html#using-finagle-thrift
+    // See the docs at https://twitter.github.io/finagle/guide/Protocols.html#using-finagle-thrift
     //#thriftserverapi
-    val server = Thrift.serveIface(
+    val server = Thrift.server.serveIface(
       "localhost:1234",
       new LoggerService[Future] {
         def log(message: String, logLevel: Int): Future[String] = {
@@ -41,7 +41,7 @@ object ThriftServiceIfaceExample {
 
     //#thriftclientapi
     val clientServiceIface: LoggerService.ServiceIface =
-      Thrift.newServiceIface[LoggerService.ServiceIface]("localhost:1234")
+      Thrift.client.newServiceIface[LoggerService.ServiceIface]("localhost:1234")
     //#thriftclientapi
 
     //#thriftclientapi-call
@@ -84,7 +84,7 @@ object ThriftServiceIfaceExample {
     //#thriftclientapi-retries
 
     //#thriftclientapi-methodiface
-    val client: LoggerService.FutureIface = Thrift.newIface[LoggerService.FutureIface]("localhost:1234")
+    val client: LoggerService.FutureIface = Thrift.client.newIface[LoggerService.FutureIface]("localhost:1234")
     client.log("message", 4) onSuccess { response =>
       println("Client received response: " + response)
     }
@@ -92,7 +92,7 @@ object ThriftServiceIfaceExample {
 
     //#thriftclientapi-method-adapter
     val filteredMethodIface: LoggerService[Future] =
-      Thrift.newMethodIface(clientServiceIface.copy(log = filteredLog))
+      Thrift.client.newMethodIface(clientServiceIface.copy(log = filteredLog))
     Await.result(filteredMethodIface.log("ping", 3).map(println))
     //#thriftclientapi-method-adapter
   }

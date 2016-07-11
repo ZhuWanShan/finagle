@@ -2,16 +2,13 @@ package com.twitter.finagle.memcached.replication
 
 import _root_.java.lang.{Boolean => JBoolean, Long => JLong}
 
-import scala.collection.JavaConversions._
 import scala.util.Random
 
 import com.twitter.conversions.time._
 import com.twitter.finagle.builder.{Cluster, ClientBuilder, ClientConfig}
-import com.twitter.finagle.cacheresolver.CacheNode
 import com.twitter.finagle.Group
 import com.twitter.finagle.memcached._
 import com.twitter.finagle.memcached.protocol.Value
-import com.twitter.finagle.memcached.util.ChannelBufferUtils._
 import com.twitter.finagle.stats.{StatsReceiver, NullStatsReceiver}
 import com.twitter.io.Buf
 import com.twitter.util._
@@ -216,16 +213,16 @@ class BaseReplicationClient(clients: Seq[Client], statsReceiver: StatsReceiver =
   /**
    * Attempts to perform a CAS operation on all replicas, and returns the aggregated replication status.
    */
-  def cas(key: String, value: Buf, casUniques: Seq[Buf]): Future[ReplicationStatus[JBoolean]] =
-    cas(key, 0, Time.epoch, value, casUniques)
+  def checkAndSet(key: String, value: Buf, casUniques: Seq[Buf]): Future[ReplicationStatus[CasResult]] =
+    checkAndSet(key, 0, Time.epoch, value, casUniques)
 
-  def cas(key: String, flags: Int, expiry: Time, value: Buf, casUniques: Seq[Buf]): Future[ReplicationStatus[JBoolean]] = {
+  def checkAndSet(key: String, flags: Int, expiry: Time, value: Buf, casUniques: Seq[Buf]): Future[ReplicationStatus[CasResult]] = {
     assert(clients.size == casUniques.size)
 
     // cannot use collectAndResolve helper here as this is the only case where there's no common op
     Future.collect((clients zip casUniques) map {
       case (c, u) =>
-        c.cas(key, flags, expiry, value, u).transform(Future.value)
+        c.checkAndSet(key, flags, expiry, value, u).transform(Future.value)
     }) map { toReplicationStatus }
   }
 
@@ -386,11 +383,11 @@ class SimpleReplicationClient(underlying: BaseReplicationClient) extends Client 
   /**
    * Check and set a key, succeed only if all replicas succeed.
    */
-  def cas(key: String, flags: Int, expiry: Time, value: Buf, casUnique: Buf): Future[JBoolean] =
+  def checkAndSet(key: String, flags: Int, expiry: Time, value: Buf, casUnique: Buf): Future[CasResult] =
   {
     val Buf.Utf8(casUniqueStr) = casUnique
     val casUniqueBufs = casUniqueStr.split('|') map { Buf.Utf8(_) }
-    resolve[JBoolean]("cas", _.cas(key, flags, expiry, value, casUniqueBufs), false)
+    resolve[CasResult]("checkAndSet", _.checkAndSet(key, flags, expiry, value, casUniqueBufs), CasResult.Stored)
   }
 
   /**

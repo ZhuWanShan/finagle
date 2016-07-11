@@ -3,7 +3,6 @@ package com.twitter.finagle.mux
 import com.twitter.app.GlobalFlag
 import com.twitter.conversions.time._
 import com.twitter.finagle.{Status, Stack}
-import com.twitter.finagle.mux._
 import com.twitter.finagle.stats.{NullStatsReceiver, StatsReceiver}
 import com.twitter.finagle.util.parsers.{double, duration, int, list}
 import com.twitter.util.{Duration, Future}
@@ -34,15 +33,13 @@ private object NullFailureDetector extends FailureDetector {
  *
  * Value of:
  * "none": turn off threshold failure detector
- * "dark": turn off threshold failure detector; but pings remote
- *         servers, and export stats.
  * "threshold:minPeriod:threshold:win:closeTimeout":
  *         use the specified configuration for failure detection
  */
-object sessionFailureDetector extends GlobalFlag(
-  "threshold:5.seconds:2:100:duration.top",
+object sessionFailureDetector extends GlobalFlag[String](
+  "threshold:5.seconds:2:100:4.seconds",
   "The failure detector used to determine session liveness " +
-      "[none|dark|threshold:minPeriod:threshold:win:closeTimeout]")
+      "[none|threshold:minPeriod:threshold:win:closeTimeout]")
 
 
 /**
@@ -67,17 +64,6 @@ object FailureDetector {
   case object NullConfig extends Config
 
   /**
-   * Indicated to use the default ping frequency and mark busy threshold;
-   * but it just exports stats instead of actually marking an endpoint as busy.
-   */
-  case class DarkModeConfig(
-      minPeriod: Duration = 5.seconds,
-      threshold: Double = 2,
-      windowSize: Int = 100,
-      closeTimeout: Duration = Duration.Top)
-    extends Config
-
-  /**
    * Indicated to use the [[com.twitter.finagle.mux.ThresholdFailureDetector]]
    * configured with these values when creating a new detector.
    *
@@ -87,12 +73,17 @@ object FailureDetector {
    * in the history. A small threshold makes the detection sensitive to potential
    * failures. There can be a low rate of false positive, which is fine in most
    * production cases with cluster redundancy.
+   *
+   * `closeTimeout` allows a session to be closed when a ping response times out
+   * after 4 seconds. This allows sessions to be reestablished when there may be
+   * a networking issue, so that it can choose an alternative networking path instead.
+   * The default 4 seconds is pretty conservative regarding normal ping RTT.
    */
   case class ThresholdConfig(
       minPeriod: Duration = 5.seconds,
       threshold: Double = 2,
       windowSize: Int = 100,
-      closeTimeout: Duration = Duration.Top)
+      closeTimeout: Duration = 4.seconds)
     extends Config
 
   /**
@@ -121,13 +112,9 @@ object FailureDetector {
     config match {
       case NullConfig => NullFailureDetector
 
-      case cfg: DarkModeConfig =>
-        new ThresholdFailureDetector(ping, cfg.minPeriod, cfg.threshold,
-          cfg.windowSize, cfg.closeTimeout, darkMode = true, statsReceiver = statsReceiver)
-
       case cfg: ThresholdConfig =>
         new ThresholdFailureDetector(ping, cfg.minPeriod, cfg.threshold,
-          cfg.windowSize, cfg.closeTimeout, darkMode = false, statsReceiver = statsReceiver)
+          cfg.windowSize, cfg.closeTimeout, statsReceiver = statsReceiver)
 
       case GlobalFlagConfig =>
         parseConfigFromFlags(ping, statsReceiver = statsReceiver)
@@ -146,7 +133,7 @@ object FailureDetector {
     sessionFailureDetector() match {
       case list("threshold", duration(min), double(threshold), int(win), duration(closeTimeout)) =>
         new ThresholdFailureDetector(
-          ping, min, threshold, win, closeTimeout, nanoTime, false, statsReceiver)
+          ping, min, threshold, win, closeTimeout, nanoTime, statsReceiver)
 
       case list("threshold", duration(min), double(threshold), int(win)) =>
         new ThresholdFailureDetector(
@@ -163,10 +150,6 @@ object FailureDetector {
       case list("threshold") =>
         new ThresholdFailureDetector(
           ping, nanoTime = nanoTime, statsReceiver = statsReceiver)
-
-      case list("dark") =>
-        new ThresholdFailureDetector(
-          ping, nanoTime = nanoTime, statsReceiver = statsReceiver, darkMode = true)
 
       case list("none") =>
         NullFailureDetector

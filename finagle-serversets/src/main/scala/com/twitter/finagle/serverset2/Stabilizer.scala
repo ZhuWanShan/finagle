@@ -1,8 +1,14 @@
 package com.twitter.finagle.serverset2
 
-import com.twitter.finagle.{Addr, WeightedSocketAddress}
+import com.twitter.concurrent.NamedPoolThreadFactory
+import com.twitter.conversions.time._
+import com.twitter.finagle.util.{HashedWheelTimer, TimerStats}
+import com.twitter.finagle.stats.FinagleStatsReceiver
+import com.twitter.finagle.{Addr, Address}
+import com.twitter.finagle.addr.WeightedAddress
 import com.twitter.util._
-import java.net.SocketAddress
+import java.util.concurrent.TimeUnit
+import org.jboss.netty.{util => netty}
 
 /**
  * An Epoch is a Event that notifies its listener
@@ -19,15 +25,54 @@ private [serverset2] object Epoch {
 }
 
 private[serverset2] class Epoch(
-    val event: Event[Unit],
-    val period: Duration)
+  val event: Event[Unit],
+  val period: Duration
+)
 
 private[serverset2] object Stabilizer {
 
+  // Use our own timer to avoid doing work in the global timer's thread and causing timer deviation
+  // the notify() run each epoch can trigger some slow work.
+  // nettyHwt required to get TimerStats
+  private val nettyHwt = new netty.HashedWheelTimer(
+      new NamedPoolThreadFactory("finagle-serversets Stabilizer timer", true/*daemons*/),
+      HashedWheelTimer.TickDuration.inMilliseconds,
+      TimeUnit.MILLISECONDS,
+      HashedWheelTimer.TicksPerWheel)
+  private val epochTimer = HashedWheelTimer(nettyHwt)
+
+  TimerStats.deviation(
+    nettyHwt,
+    10.milliseconds,
+    FinagleStatsReceiver.scope("zk2").scope("timer"))
+
+  TimerStats.hashedWheelTimerInternals(
+    nettyHwt,
+    () => 10.seconds,
+    FinagleStatsReceiver.scope("zk2").scope("timer"))
+
+  private val notifyMs = FinagleStatsReceiver.scope("serverset2").scope("stabilizer").stat("notify_ms")
+
+  // Create an event of epochs for the given duration.
+  def epochs(period: Duration): Epoch =
+    new Epoch(
+      new Event[Unit] {
+        def register(w: Witness[Unit]) = {
+          epochTimer.schedule(period) {
+            val elapsed = Stopwatch.start()
+            w.notify(())
+            notifyMs.add(elapsed().inMilliseconds)
+          }
+        }
+      },
+      period
+    )
+
+
   // Used for delaying removals
   private case class State(
-    limbo: Set[SocketAddress],
-    active: Set[SocketAddress],
+    limbo: Option[Set[Address]],
+    active: Option[Set[Address]],
     addr: Addr)
 
   // Used for batching updates
@@ -37,7 +82,7 @@ private[serverset2] object Stabilizer {
     next: Option[Addr],
     lastEmit: Time)
 
-  private val emptyState = State(Set.empty, Set.empty, Addr.Pending)
+  private val initState = State(None, None, Addr.Pending)
 
   /**
    * Stabilize the address relative to the supplied source of removalEpochs,
@@ -76,15 +121,18 @@ private[serverset2] object Stabilizer {
     // The updates to this stabilized address are then batched and
     // triggered at most once per batchEpoch.
 
-    val states: Event[State] = (va.changes select removalEpoch.event).foldLeft(emptyState) {
+    val states: Event[State] = (va.changes select removalEpoch.event).foldLeft(initState) {
       // Addr update
       case (st@State(limbo, active, last), Left(addr)) =>
         addr match {
           case Addr.Failed(_) =>
-            State(Set.empty, active++limbo, addr)
+            State(None, Some(active.getOrElse(Set.empty)++limbo.getOrElse(Set.empty)), addr)
 
           case Addr.Bound(bound, _) =>
-            State(limbo, merge(active, bound), addr)
+            State(limbo, Some(merge(active.getOrElse(Set.empty), bound)), addr)
+
+          case Addr.Neg if (active == None && limbo == None) =>
+            State(limbo, Some(Set.empty), addr)
 
           case addr =>
             // Any other address simply propagates the address while
@@ -98,10 +146,10 @@ private[serverset2] object Stabilizer {
       case (st@State(limbo, active, last), Right(())) =>
         last match {
           case Addr.Bound(bound, _) =>
-            State(active, bound, last)
+            State(active, Some(bound), last)
 
           case Addr.Neg =>
-            State(active, Set.empty, Addr.Neg)
+            State(active, Some(Set.empty), Addr.Neg)
 
           case Addr.Pending | Addr.Failed(_) =>
             // If the last address is nonbound, we ignore it and
@@ -113,9 +161,14 @@ private[serverset2] object Stabilizer {
     }
 
     val addrs = states.map { case State(limbo, active, last) =>
-      val all = merge(limbo, active)
-      if (all.nonEmpty) Addr.Bound(all)
-      else last
+      val all = merge(limbo.getOrElse(Set.empty), active.getOrElse(Set.empty))
+      if (all.nonEmpty) {
+        Addr.Bound(all)
+      } else if (limbo != None || active != None) {
+        Addr.Neg
+      } else {
+        last
+      }
     }
 
     // Trigger at most one change to state per batchEpoch
@@ -159,12 +212,12 @@ private[serverset2] object Stabilizer {
    * Merge WeightedSocketAddresses with same underlying SocketAddress
    * preferring weights from `next` over `prev`.
    */
-  private def merge(prev: Set[SocketAddress], next: Set[SocketAddress]): Set[SocketAddress] = {
-    val nextStripped = next.map(WeightedSocketAddress.extract(_)._1)
+  private def merge(prev: Set[Address], next: Set[Address]): Set[Address] = {
+    val nextUnweighted = next.map(WeightedAddress.extract(_)._1)
 
     val legacy = prev.filter { addr =>
-      val (sa, _) = WeightedSocketAddress.extract(addr)
-      !nextStripped.contains(sa)
+      val (unweighted, _) = WeightedAddress.extract(addr)
+      !nextUnweighted.contains(unweighted)
     }
 
     legacy ++ next

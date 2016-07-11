@@ -7,9 +7,9 @@ We'd love to get patches from you!
 We are not currently publishing snapshots for Finagle's dependencies, which
 means that it may be necessary to publish the `develop` branches of these
 libraries locally in order to work on Finagle's `develop` branch. To do so
-you can run `./bin/travisci` script and pass it a `TRAVIS_SCALA_VERSION`
-environment variable. For example, the following command locally publishes
-all the Finagle dependencies built for Scala 2.11.7.
+you can run `./bin/travisci` script and pass it an optional
+`TRAVIS_SCALA_VERSION` environment variable. For example, the following command
+locally publishes all the Finagle dependencies built for Scala 2.11.7.
 
 ```
 TRAVIS_SCALA_VERSION=2.11.7 ./bin/travisci
@@ -62,18 +62,41 @@ locally).
 We generally follow [Effective Scala][es] and the [Scala Style Guide][ssg]. When
 in doubt, look around the codebase and see how it's done elsewhere.
 
+## Issues
+
+When creating an issue please try to ahere to the following format:
+
+    One line summary of the issue (less than 72 characters)
+
+    ### Expected behavior
+
+    As concisely as possible, describe the expected behavior.
+
+    ### Actual behavior
+
+    As concisely as possible, describe the observed behavior.
+
+    ### Steps to reproduce the behavior
+
+    List all relevant steps to reproduce the observed behavior.
+
+## Pull Requests
+
 Comments should be formatted to a width no greater than 80 columns.
 
 Files should be exempt of trailing spaces.
 
 We adhere to a specific format for commit messages. Please write your commit
-messages along these guidelines:
+messages along these guidelines. Please keep the line width no greater than
+80 columns (You can use `fmt -n -p -w 80` to accomplish this).
+
     One line description of your change (less than 72 characters)
 
     Problem
 
-    Explain here the context, and why you're making that change.
-    What is the problem you're trying to solve?
+    Explain the context and why you're making that change.  What is the
+    problem you're trying to solve? In some cases there is not a problem
+    and this can be thought of being the motivation for your change.
 
     Solution
 
@@ -81,7 +104,9 @@ messages along these guidelines:
 
     Result
 
-    After your change, what will change?
+    What will change as a result of your pull request? Note that sometimes
+    this section is unnecessary because it is self-explanatory based on
+    the solution.
 
 ## Code Review
 

@@ -41,7 +41,7 @@ trait Transport[In, Out] extends Closable { self =>
    * write on the Transport, but this allows clients to listen to
    * close events.
    */
-  val onClose: Future[Throwable]
+  def onClose: Future[Throwable]
 
   /**
    * The locally bound address of this transport.
@@ -69,12 +69,12 @@ trait Transport[In, Out] extends Closable { self =>
     new Transport[In1, Out1] {
       def write(req: In1): Future[Unit] = Future(f(req)).flatMap(self.write)
       def read(): Future[Out1] = self.read().map(g)
-      def status = self.status
-      val onClose = self.onClose
-      def localAddress = self.localAddress
-      def remoteAddress = self.remoteAddress
-      def peerCertificate = self.peerCertificate
-      def close(deadline: Time) = self.close(deadline)
+      def status: Status = self.status
+      def onClose: Future[Throwable] = self.onClose
+      def localAddress: SocketAddress = self.localAddress
+      def remoteAddress: SocketAddress = self.remoteAddress
+      def peerCertificate: Option[Certificate] = self.peerCertificate
+      def close(deadline: Time): Future[Unit] = self.close(deadline)
       override def toString: String = self.toString
     }
 }
@@ -141,12 +141,12 @@ object Transport {
    * $param the verbosity of a `Transport`. Transport activity is
    * written to [[com.twitter.finagle.param.Logger]].
    */
-  case class Verbose(b: Boolean) {
+  case class Verbose(enabled: Boolean) {
     def mk(): (Verbose, Stack.Param[Verbose]) =
       (this, Verbose.param)
   }
   object Verbose {
-    implicit val param = Stack.Param(Verbose(false))
+    implicit val param = Stack.Param(Verbose(enabled = false))
   }
 
   /**
@@ -172,11 +172,38 @@ object Transport {
   }
 
   /**
+   * $param the TLS config for a `Transport` (default: disabled).
+   */
+  case class Tls(config: TlsConfig)
+  object Tls {
+    implicit val param: Stack.Param[Tls] = Stack.Param(Tls(TlsConfig.Disabled))
+  }
+
+  /**
+   * $param the options (i.e., socket options) of a `Transport`.
+   *
+   * @param noDelay enables or disables `TCP_NODELAY` (Nagle's algorithm)
+   *                option on a transport socket (`noDelay = true` means
+   *                disabled). Default is `true` (disabled).
+   *
+   * @param reuseAddr enables or disables `SO_REUSEADDR` option on a
+   *                  transport socket. Default is `true`.
+   */
+  case class Options(noDelay: Boolean, reuseAddr: Boolean) {
+    def mk(): (Options, Stack.Param[Options]) = (this, Options.param)
+  }
+
+  object Options {
+    implicit val param: Stack.Param[Options] =
+      Stack.Param(Options(noDelay = true, reuseAddr = true))
+  }
+
+  /**
    * Serializes the object stream from a `Transport` into a
    * [[com.twitter.io.Writer]].
    *
    * The serialization function `f` can return `Future.None` to interrupt the
-   * stream to faciliate using the transport with multiple writers and vice
+   * stream to facilitate using the transport with multiple writers and vice
    * versa.
    *
    * Both transport and writer are unmanaged, the caller must close when
@@ -213,17 +240,27 @@ object Transport {
    * is complete, or else has failed.
    *
    * @note This deserves its own implementation, independently of
-   * using copyToWriter. In particular, in today's implemenation,
+   * using copyToWriter. In particular, in today's implementation,
    * the path of interrupts are a little convoluted; they would be
    * clarified by an independent implementation.
    */
   private[finagle] def collate[A](trans: Transport[_, A], chunkOfA: A => Future[Option[Buf]])
   : Reader with Future[Unit] = new Promise[Unit] with Reader {
     private[this] val rw = Reader.writable()
-    become(Transport.copyToWriter(trans, rw)(chunkOfA) respond {
-      case Throw(exc) => rw.fail(exc)
-      case Return(_) => rw.close()
-    })
+
+    // Ensure that collate's future is satisfied _before_ its reader
+    // is closed. This allows callers to observe the stream completion
+    // before readers do.
+    private[this] val writes = copyToWriter(trans, rw)(chunkOfA)
+    forwardInterruptsTo(writes)
+    writes.respond {
+      case ret@Throw(t) =>
+        updateIfEmpty(ret)
+        rw.fail(t)
+      case r@Return(_) =>
+        updateIfEmpty(r)
+        rw.close()
+    }
 
     def read(n: Int) = rw.read(n)
 
@@ -249,6 +286,21 @@ object Transport {
  */
 trait TransportFactory {
   def apply[In, Out](): Transport[In, Out]
+}
+
+/**
+ * A [[Transport]] that defers all methods except `read` and `write`
+ * to `self`.
+ */
+abstract class TransportProxy[In, Out](_self: Transport[In, Out]) extends Transport[In, Out] {
+  def self: Transport[In, Out] = _self
+  def status: Status = self.status
+  def onClose: Future[Throwable] = self.onClose
+  def localAddress: SocketAddress = self.localAddress
+  def remoteAddress: SocketAddress = self.remoteAddress
+  def peerCertificate: Option[Certificate] = self.peerCertificate
+  def close(deadline: Time): Future[Unit] = self.close(deadline)
+  override def toString: String = self.toString
 }
 
 /**

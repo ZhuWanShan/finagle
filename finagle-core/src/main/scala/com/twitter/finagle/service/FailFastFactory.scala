@@ -5,12 +5,9 @@ import com.twitter.finagle._
 import com.twitter.finagle.client.Transporter
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.finagle.util.{DefaultLogger, Updater}
-import com.twitter.finagle.util.InetSocketAddressUtil.unconnected
 import com.twitter.logging.Level
-import com.twitter.util.{Future, Duration, Time, Throw, Return, Timer, TimerTask, Promise}
-import java.net.SocketAddress
+import com.twitter.util.{Future, Duration, Time, Throw, Return, Timer, TimerTask}
 import java.util.logging.Logger
-import scala.util.Random
 
 object FailFastFactory {
   private sealed trait State
@@ -29,14 +26,21 @@ object FailFastFactory {
     val Success, Fail, Timeout, TimeoutFail, Close = Value
   }
 
-  private val defaultBackoffs = (Backoff.exponential(1.second, 2) take 5) ++ Backoff.const(32.seconds)
-  private val rng = new Random
+  // put a reasonably sized cap on the number of jittered backoffs so that a
+  // "permanently" dead host doesn't create a space leak. since each new backoff
+  // that is taken will be held onto by this global Stream (having the trailing
+  // `constant` avoids this issue).
+  private val defaultBackoffs: Stream[Duration] =
+    Backoff.exponentialJittered(1.second, 32.seconds).take(16) ++ Backoff.constant(32.seconds)
 
   val role = Stack.Role("FailFast")
 
   /**
-   * For details on usage see the
+   * For details on why clients see [[FailedFastException]]s see the
    * [[https://twitter.github.io/finagle/guide/FAQ.html#why-do-clients-see-com-twitter-finagle-failedfastexception-s FAQ]]
+   *
+   * @see The [[https://twitter.github.io/finagle/guide/Clients.html#fail-fast user guide]]
+   *      for more details.
    */
   case class FailFast(enabled: Boolean) {
     def mk(): (FailFast, Stack.Param[FailFast]) =
@@ -97,6 +101,9 @@ object FailFastFactory {
  * Inflight attempts to connect will continue uninterrupted. However, trying to
  * connect *after* being marked dead will fail fast until the background process
  * is able to establish a connection.
+ *
+ * @see The [[https://twitter.github.io/finagle/guide/Clients.html#fail-fast user guide]]
+ *      for more details.
  */
 private[finagle] class FailFastFactory[Req, Rep](
     underlying: ServiceFactory[Req, Rep],
@@ -104,7 +111,7 @@ private[finagle] class FailFastFactory[Req, Rep](
     timer: Timer,
     label: String,
     logger: Logger = DefaultLogger,
-    endpoint: SocketAddress = unconnected,
+    endpoint: Address = Address.failing,
     backoffs: Stream[Duration] = FailFastFactory.defaultBackoffs)
   extends ServiceFactoryProxy(underlying) {
   import FailFastFactory._
@@ -132,12 +139,6 @@ private[finagle] class FailFastFactory[Req, Rep](
       }
     }
 
-  private[this] def getBackoffs(): Stream[Duration] = backoffs map { duration =>
-    // Add a 10% jitter to reduce correlation.
-    val ms = duration.inMilliseconds
-    (ms + ms*(rng.nextFloat()*0.10)).toInt.milliseconds
-  }
-
   @volatile private[this] var state: State = Ok
 
   private[this] val update = new Updater[Observation.t] {
@@ -151,7 +152,7 @@ private[finagle] class FailFastFactory[Req, Rep](
         state = Ok
 
       case Observation.Fail if state == Ok =>
-        val (wait, rest) = getBackoffs() match {
+        val (wait, rest) = backoffs match {
           case Stream.Empty => (Duration.Zero, Stream.empty[Duration])
           case wait #:: rest => (wait, rest)
         }

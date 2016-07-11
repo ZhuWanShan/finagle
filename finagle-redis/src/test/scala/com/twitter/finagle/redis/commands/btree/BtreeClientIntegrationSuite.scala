@@ -1,10 +1,11 @@
 package com.twitter.finagle.redis.integration
 
+import com.twitter.finagle.Redis
 import com.twitter.finagle.redis.Client
-import com.twitter.finagle.redis.util.{CBToString, StringToChannelBuffer}
+import com.twitter.finagle.redis.util.BufToString
+import com.twitter.io.Buf
 import com.twitter.util.Await
 import java.util.UUID
-import org.jboss.netty.buffer.ChannelBuffer
 import org.junit.Ignore
 import org.junit.runner.RunWith
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
@@ -24,7 +25,7 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
     // After the changes become a part of the installed redis server
     // This will use RedisCluster to start and manage the external redis server
     val hostAddress = "127.0.0.1:6379"
-    client = Client(hostAddress)
+    client = Redis.newRichClient(hostAddress)
     dict = generateTestCases()
     assert(client != null)
   }
@@ -32,7 +33,7 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   override def afterAll(): Unit = {
     println("Closing client...")
     client.flushDB()
-    client.release()
+    client.close()
     println("Done!")
   }
 
@@ -89,11 +90,11 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
     val value = "optimus"
 
     println("Setting " + key + "->" + value)
-    client.set(StringToChannelBuffer(key), StringToChannelBuffer(value))
+    client.set(Buf.Utf8(key), Buf.Utf8(value))
     println("Getting value for key " + key)
-    val getResult = Await.result(client.get(StringToChannelBuffer(key)))
+    val getResult = Await.result(client.get(Buf.Utf8(key)))
     getResult match {
-      case Some(n) => println("Got result: " + new String(n.array))
+      case Some(n) => println("Got result: " + Buf.Utf8.unapply(n).get)
       case None => println("Didn't get the value!")
     }
   }
@@ -122,9 +123,8 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   def testBadd(client: Client, dict: mutable.HashMap[String, mutable.HashMap[String, String]]) {
     for ((outerKey, inner) <- dict) {
       for ((innerKey, value) <- inner) {
-        val target = client.bAdd(StringToChannelBuffer(outerKey), StringToChannelBuffer(innerKey),
-          StringToChannelBuffer(value))
-        assert(Await.result(target) === 1, "BADD failed for " + outerKey + " " + innerKey)
+        val target = client.bAdd(Buf.Utf8(outerKey), Buf.Utf8(innerKey), Buf.Utf8(value))
+        assert(Await.result(target) == 1, "BADD failed for " + outerKey + " " + innerKey)
       }
     }
 
@@ -133,8 +133,8 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
 
   def testBcard(client: Client, dict: mutable.HashMap[String, mutable.HashMap[String, String]]) {
     for ((outerKey, inner) <- dict) {
-      val target = client.bCard(StringToChannelBuffer(outerKey))
-      assert(inner.size === Await.result(target),
+      val target = client.bCard(Buf.Utf8(outerKey))
+      assert(inner.size == Await.result(target),
         "BCARD failed for " + outerKey + " expected " + inner.size + " got " + Await.result(target))
       }
 
@@ -144,9 +144,9 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   def testBget(client: Client, dict: mutable.HashMap[String, mutable.HashMap[String, String]]) {
     for ((outerKey, inner) <- dict) {
       for ((innerKey, value) <- inner) {
-        val target = client.bGet(StringToChannelBuffer(outerKey), StringToChannelBuffer(innerKey))
-        val targetVal = CBToString(Await.result(target).get)
-        assert(value === targetVal,
+        val target = client.bGet(Buf.Utf8(outerKey), Buf.Utf8(innerKey))
+        val targetVal = BufToString(Await.result(target).get)
+        assert(value == targetVal,
           "BGET failed for " + outerKey + " expected " + value + " got " + targetVal)
       }
     }
@@ -157,9 +157,8 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   def testBrem(client: Client, dict: mutable.HashMap[String, mutable.HashMap[String, String]]) {
     for ((outerKey, inner) <- dict) {
       for ((innerKey, value) <- inner) {
-        val target = client.bRem(StringToChannelBuffer(outerKey),
-          Seq(StringToChannelBuffer(innerKey)))
-        assert(Await.result(target) === 1, "BREM failed for " + outerKey + " " + innerKey)
+        val target = client.bRem(Buf.Utf8(outerKey), Seq(Buf.Utf8(innerKey)))
+        assert(Await.result(target) == 1, "BREM failed for " + outerKey + " " + innerKey)
         inner.remove(innerKey)
       }
     }
@@ -170,7 +169,7 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   def testBrange(client: Client, dict: mutable.HashMap[String, mutable.HashMap[String, String]]) {
     for ((outerKey, inner) <- dict) {
       val innerKeys = inner.toList.sortBy(_._1)
-      val target = Await.result(client.bRange(StringToChannelBuffer(outerKey), None, None))
+      val target = Await.result(client.bRange(Buf.Utf8(outerKey), None, None))
       validate(outerKey, innerKeys, target)
     }
 
@@ -186,8 +185,7 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       var innerKeys = inner.toList.sortBy(_._1)
       val start = rand.nextInt(innerKeys.size)
       innerKeys = innerKeys.drop(start)
-      val target = Await.result(client.bRange(StringToChannelBuffer(outerKey),
-        Option(StringToChannelBuffer(innerKeys.head._1)), None))
+      val target = Await.result(client.bRange(Buf.Utf8(outerKey), Option(Buf.Utf8(innerKeys.head._1)), None))
       validate(outerKey, innerKeys, target)
     }
 
@@ -203,8 +201,7 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       var innerKeys = inner.toList.sortBy(_._1)
       val end = rand.nextInt(innerKeys.size)
       innerKeys = innerKeys.dropRight(end)
-      val target = Await.result(client.bRange(StringToChannelBuffer(outerKey), None,
-        Option(StringToChannelBuffer(innerKeys.last._1))))
+      val target = Await.result(client.bRange(Buf.Utf8(outerKey), None, Option(Buf.Utf8(innerKeys.last._1))))
       validate(outerKey, innerKeys, target)
     }
 
@@ -221,9 +218,10 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       val start = rand.nextInt(innerKeys.size)
       val end = rand.nextInt(innerKeys.size)
       val target = client.bRange(
-        StringToChannelBuffer(outerKey),
-        Option(StringToChannelBuffer(innerKeys(start)._1)),
-        Option(StringToChannelBuffer(innerKeys(end)._1)))
+        Buf.Utf8(outerKey),
+        Option(Buf.Utf8(innerKeys(start)._1)),
+        Option(Buf.Utf8(innerKeys(end)._1))
+      )
 
       if (start > end) {
         assert(Await.ready(target).poll.get.isThrow,
@@ -246,8 +244,8 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       var innerKeys = inner.toList.sortBy(_._1)
       val start = UUID.randomUUID().toString
       innerKeys = innerKeys.filter(p => (start <= p._1))
-      val target = Await.result(client.bRange(StringToChannelBuffer(outerKey),
-        Option(StringToChannelBuffer(start)), None))
+      val target = Await.result(client.bRange(Buf.Utf8(outerKey),
+        Option(Buf.Utf8(start)), None))
       validate(outerKey, innerKeys, target)
     }
 
@@ -262,8 +260,8 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       var innerKeys = inner.toList.sortBy(_._1)
       val end = UUID.randomUUID().toString
       innerKeys = innerKeys.filter(p => (p._1 <= end))
-      val target = Await.result(client.bRange(StringToChannelBuffer(outerKey), None,
-        Option(StringToChannelBuffer(end))))
+      val target = Await.result(client.bRange(Buf.Utf8(outerKey), None,
+        Option(Buf.Utf8(end))))
       validate(outerKey, innerKeys, target)
     }
 
@@ -280,9 +278,9 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
       val end = UUID.randomUUID().toString
       innerKeys = innerKeys.filter(p => (start <= p._1 && p._1 <= end))
       val target = client.bRange(
-        StringToChannelBuffer(outerKey),
-        Option(StringToChannelBuffer(start)),
-        Option(StringToChannelBuffer(end)))
+        Buf.Utf8(outerKey),
+        Option(Buf.Utf8(start)),
+        Option(Buf.Utf8(end)))
 
       if (start > end) {
         assert(Await.ready(target).poll.get.isThrow,
@@ -299,19 +297,19 @@ final class BtreeClientIntegrationSuite extends FunSuite with BeforeAndAfterAll 
   def validate(
     outerKey: String,
     exp: List[(String, String)],
-    got: Seq[(ChannelBuffer, ChannelBuffer)]
+    got: Seq[(Buf, Buf)]
   ) {
-    assert(got.size === exp.size,
+    assert(got.size == exp.size,
       "BRANGE failed for " + outerKey + " expected size " + exp.size + " got size " + got.size)
 
     for (i <- 0 until exp.size) {
       val expKey = exp(i)._1
-      val gotKey = CBToString(got(i)._1)
+      val gotKey = BufToString(got(i)._1)
       val expVal = exp(i)._2
-      val gotVal = CBToString(got(i)._2)
-      assert(exp(i)._1 === CBToString(got(i)._1),
+      val gotVal = BufToString(got(i)._2)
+      assert(exp(i)._1 == BufToString(got(i)._1),
         "Key mismatch for outerKey " + outerKey + " expected " + expKey + "got " + gotKey)
-      assert(exp(i)._2 === CBToString(got(i)._2),
+      assert(exp(i)._2 == BufToString(got(i)._2),
         "Value mismatch for outerKey " + outerKey + " expected " + expVal + "got " + gotVal)
     }
   }

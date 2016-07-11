@@ -1,6 +1,7 @@
 package com.twitter.finagle.stats
 
 import com.twitter.common.metrics.{Histogram, HistogramInterface, Percentile, Snapshot}
+import com.twitter.concurrent.Once
 import com.twitter.conversions.time._
 import com.twitter.util.{Duration, Time}
 import java.util.concurrent.atomic.AtomicReference
@@ -19,13 +20,18 @@ private[stats] class MetricsBucketedHistogram(
     latchPeriod: Duration = MetricsBucketedHistogram.DefaultLatchPeriod)
   extends HistogramInterface
 {
+  import MetricsBucketedHistogram.{MutableSnapshot, HistogramCountsSnapshot} 
   assert(name.length > 0)
 
   private[this] val nextSnapAfter = new AtomicReference(Time.Undefined)
 
   // thread-safety provided via synchronization on `current`
   private[this] val current = BucketedHistogram()
-  private[this] val snap = new MetricsBucketedHistogram.MutableSnapshot(percentiles)
+  private[this] val snap = new MutableSnapshot(percentiles)
+  private[this] val histogramCountsSnap = new HistogramCountsSnapshot
+  // If histograms counts haven't been requested we don't want to be
+  // computing them every snapshot
+  @volatile private[this] var isHistogramRequested: Boolean = false
 
   def getName: String = name
 
@@ -37,6 +43,27 @@ private[stats] class MetricsBucketedHistogram(
   def add(value: Long): Unit = current.synchronized {
     current.add(value)
   }
+
+  /**
+   * Produces a 1 minute snapshot of histogram counts 
+   */
+  private[this] val hd: HistogramDetail = {
+    new HistogramDetail {
+      private[this] val fn = Once {
+        isHistogramRequested = true
+        current.synchronized {
+          histogramCountsSnap.recomputeFrom(current)
+        }
+      }
+
+      def counts: Seq[BucketAndCount] = {
+        fn()
+        histogramCountsSnap.counts
+      }
+    }
+  }
+
+  def histogramDetail: HistogramDetail = hd
 
   def snapshot(): Snapshot = {
     // at most once per `latchPeriod` after the first call to
@@ -52,8 +79,13 @@ private[stats] class MetricsBucketedHistogram(
       // we give 1 second of wiggle room so that a slightly early request
       // will still trigger a roll.
       if (Time.now >= nextSnapAfter.get - 1.second) {
-        // time to recompute the snapshot, clearing it out before allowing usage.
-        nextSnapAfter.set(nextSnapAfter.get + latchPeriod)
+        // if nextSnapAfter has a datetime older than (latchPeriod*2) ago, update it after next minutes.
+        if (nextSnapAfter.get + latchPeriod*2 > Time.now) {
+          nextSnapAfter.set(nextSnapAfter.get + latchPeriod)
+        } else {
+          nextSnapAfter.set(JsonExporter.startOfNextMinute)
+        }
+        if (isHistogramRequested) histogramCountsSnap.recomputeFrom(current)
         snap.recomputeFrom(current)
         current.clear()
       }
@@ -130,6 +162,19 @@ private object MetricsBucketedHistogram {
       avg = 0.0
       java.util.Arrays.fill(quantiles, 0L)
     }
+  }
+
+  /** 
+   * Stores a mutable reference to Histogram counts.
+   * Thread safety needs to be provided on histogram
+   * instances passed to recomputeFrom (histogram counts
+   * should not be changing while it is called).
+   */
+  private final class HistogramCountsSnapshot {
+    @volatile private[stats] var counts: Seq[BucketAndCount] = Nil
+
+    def recomputeFrom(histo: BucketedHistogram): Unit = 
+      counts = histo.bucketAndCounts
   }
 
 }
